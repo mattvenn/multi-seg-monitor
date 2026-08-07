@@ -1,0 +1,56 @@
+# Tiny Tapeout project information
+project:
+  title:        "Multi Segment Monitor"
+  author:       "Matt Venn"
+  discord:      "mattvenn"
+  description:  "Simulates a 52x30 array of 7 segment displays on a VGA screen"
+  language:     "Verilog"
+  clock_hz:     31500000
+
+  # How many tiles your design occupies? A single tile is about 167x108 uM.
+  tiles: "4x2"
+
+  top_module:  "tt_um_multi_seg_monitor"
+
+  source_files:
+    - tt_um_multi_seg_monitor.v
+    - multi_seg_monitor.v
+    - VgaSyncGen.v
+    - line_buffer.v
+    - seg7_rom.v
+    - gamma.v
+
+# The pinout of your project. Leave unused pins blank. DO NOT delete or add any pins.
+pinout:
+  # Inputs
+  ui[0]: ""
+  ui[1]: ""
+  ui[2]: ""
+  ui[3]: ""
+  ui[4]: ""
+  ui[5]: ""
+  ui[6]: ""
+  ui[7]: ""
+
+  # Outputs (Tiny VGA pmod)
+  uo[0]: "R1"
+  uo[1]: "G1"
+  uo[2]: "B1"
+  uo[3]: "vsync"
+  uo[4]: "R0"
+  uo[5]: "G0"
+  uo[6]: "B0"
+  uo[7]: "hsync"
+
+  # Bidirectional pins
+  uio[0]: ""
+  uio[1]: ""
+  uio[2]: ""
+  uio[3]: ""
+  uio[4]: ""
+  uio[5]: ""
+  uio[6]: ""
+  uio[7]: ""
+
+# Do not change!
+yaml_version: 6

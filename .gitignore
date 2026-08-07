@@ -1,0 +1,8 @@
+build/
+src/_tt_fpga_top.v
+test/sim_build/
+test/results.xml
+test/frame.ppm
+test/frame.png
+*.vcd
+__pycache__/
