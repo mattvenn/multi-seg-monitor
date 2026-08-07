@@ -30,7 +30,10 @@ COLS, ROWS = 52, 30
 CELL_W, CELL_H = 12, 16
 MARGIN_X = 8
 
-RGB_MASK = 0b01110111  # uo_out bits carrying colour on the Tiny VGA pmod
+# On PmodVGA every uo_out bit carries colour -- R in the low nibble, B in the
+# high one -- and green sits on uio_out[3:0].  The old Tiny VGA mask here left
+# two of those bits and all of green unchecked.  tb.v already splits the pins
+# into px_r/px_g/px_b, so use those rather than masking by hand.
 
 
 async def reset(dut):
@@ -98,8 +101,10 @@ async def test_blanking(dut):
     await FallingEdge(dut.hs)
     for i in range(H_SYNC + H_BP - 1):
         await RisingEdge(dut.clk)
-        rgb = int(dut.uo_out.value) & RGB_MASK
-        assert rgb == 0, f"colour {rgb:#04x} {i} cycles into horizontal blanking"
+        r, g, b = int(dut.px_r.value), int(dut.px_g.value), int(dut.px_b.value)
+        assert (r, g, b) == (0, 0, 0), (
+            f"colour r={r:x} g={g:x} b={b:x} {i} cycles into horizontal blanking"
+        )
 
     dut._log.info("blanking ok")
 
@@ -167,10 +172,15 @@ async def test_render_frame(dut):
 # --------------------------------------------------------------------------
 # Stream port
 #
-# uio[0] is the strobe, uio[1] selects streamed data over the internal generator.
+# uio[6] is the strobe, uio[7] selects streamed data over the internal generator.
+# They moved up from uio[0:1] when the prototype output became PmodVGA, which
+# needs the low six bits of uio for the green nibble and the syncs.
 # --------------------------------------------------------------------------
-UIO_IDLE = 0b10
-UIO_STROBE = 0b11
+UIO_MODE = 1 << 7
+UIO_STB = 1 << 6
+
+UIO_IDLE = UIO_MODE
+UIO_STROBE = UIO_MODE | UIO_STB
 
 # One digit row is 16 scanlines and 208 bytes, so a byte every 64 pixel clocks
 # tracks the raster exactly.  The division is exact, which is what lets the host
@@ -234,8 +244,9 @@ async def test_stream_frame(dut):
     width, height, px = read_ppm("frame.ppm")
 
     def level_at(x, y):
-        # The testbench writes 2 bit levels scaled by 85.
-        return px[(y * width + x) * 3] // 85
+        # PmodVGA carries 4 bits per channel and the testbench scales them by 17
+        # to fill a byte, so dividing recovers the nibble the design put out.
+        return px[(y * width + x) * 3] // 17
 
     bad = []
     for row in range(segments.ROWS):
@@ -244,7 +255,9 @@ async def test_stream_frame(dut):
             sent = segments.unpack_digit(frame[off : off + 4])
             for seg in range(8):
                 x, y = segments.segment_centre(col, row, seg)
-                want = segments.GAMMA[sent[seg]] >> 4
+                # The design emits grey = level[5:2], so the 6 bit gamma entry
+                # loses its bottom two bits on the way to the pmod.
+                want = segments.GAMMA[sent[seg]] >> 2
                 got = level_at(x, y)
                 if got != want:
                     bad.append((col, row, segments.SEGMENTS[seg][0], sent[seg], want, got))
