@@ -58,6 +58,43 @@ can be iterated without hardware. That loop is what caught the first segment lay
 filling its whole cell — adjacent digits merged into each other and the grid was
 illegible.
 
+# Bring-up
+
+Nothing here has touched hardware. This is the order to try it in, chosen so each
+step adds one thing and a failure points somewhere specific.
+
+**On a new machine.** The build needs two paths:
+
+    export PATH=/path/to/oss-cad-suite/bin:$PATH
+    make bitstream TT_TOOLS=/path/to/tt-support-tools
+
+`configure --upload` also needs tt-support-tools' python environment, which was
+missing `klayout` and `chevron` on the machine this was written on —
+`pip install -r requirements.txt` in that repo.
+
+**1. Internal generator, no firmware.** Leave `uio[1]` low and the design ignores the
+stream port entirely. You should get a 52x30 grid of hex digits scrolling diagonally
+with brightness bands across it, at 4 grey levels. Compare against `test/frame.png`,
+which is the same thing from simulation.
+
+If this fails, in rough order of likelihood:
+
+| Symptom | Look at |
+|---|---|
+| No signal / monitor out of range | The clock. 31.5 MHz needs a sysclk that divides to it — 126 MHz / 4. Check what `clock_project_PWM` actually produced |
+| Sync but no picture, or garbage | Pmod pinout. Only Tiny VGA is wired up (`uo_out[3]`=vsync, `uo_out[7]`=hsync); the VGA Clock pmod has a different order |
+| Picture but sheared or rolling | VGA timing constants — but these come from `ttihp0p4-vga-clock`, which works, so suspect the clock first |
+
+**2. Streamed static image.** Set `uio[1]` high and push a single frame repeatedly.
+`tools/video2seg.py` on a still image gives you one. If the generator worked and this
+does not, the problem is in the stream port or the player, not the renderer.
+
+**3. Video.** Only after 2 is stable.
+
+The player is the least proven part — it has never been executed. The DMA register
+plumbing (`PIO0_TXF0`, `treq_sel`) is the first thing to check, then whether the TT
+SDK is still driving GPIO17-24 after PIO claims them.
+
 # Playing video
 
     tools/video2seg.py clip.mp4 video.seg --fps 24    # 6240 bytes per frame
