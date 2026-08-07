@@ -26,14 +26,19 @@ The DMA register plumbing is the part most likely to need adjusting.
 """
 
 import rp2
-from machine import Pin, freq
+from machine import Pin
 
 # Demoboard GPIO map, from the tt-demo-pcb README.  ui_in is contiguous on
 # GPIO17-24, which is what lets the whole byte leave in a single PIO `out`.
+#
+# PmodVGA prototype pinout: uio[5:0] carry video out to the pmod (G/HS/VS),
+# which is why strobe/mode moved off uio[0:1] onto uio[6:7] -- PmodVGA's
+# second connector leaves those two not-connected. vsync moved from
+# uo_out[3] (Tiny VGA) to uio[5] to match. See src/tt_um_multi_seg_monitor.v.
 DATA_BASE = 17  # ui_in[0..7]  -> GPIO17..24
-STROBE = 25  # uio[0]       -> stream strobe
-MODE = 26  # uio[1]       -> 1 selects streamed data
-VSYNC = 36  # uo_out[3]    -> Tiny VGA vsync
+STROBE = 31  # uio[6]       -> stream strobe
+MODE = 32  # uio[7]       -> 1 selects streamed data
+VSYNC = 30  # uio[5]       -> PmodVGA vsync
 
 # Display constants -- must match SPEC.md sections 1 and 6
 COLS, ROWS = 52, 30
@@ -43,7 +48,7 @@ ROW_BYTES = COLS * 4  # 208
 FRAME_BYTES = ROWS * ROW_BYTES  # 6240
 
 CLOCKS_PER_BYTE = CELL_H * H_TOTAL // ROW_BYTES  # 64, exactly
-PIXEL_DIV = 4  # demoboard PWM divider: pixel clock = sysclk / 4
+PIXEL_HZ = 31_500_000  # SPEC.md section 6: required VGA pixel clock
 
 PIO0_TXF0 = 0x50200010  # PIO0 TX FIFO 0
 
@@ -65,7 +70,7 @@ def push_bytes():
 
 
 class Player:
-    def __init__(self, path, video_fps=24.0):
+    def __init__(self, path, video_fps, pixel_hz):
         self.file = open(path, "rb")
         self.file.seek(0, 2)
         self.frames = self.file.tell() // FRAME_BYTES
@@ -87,9 +92,13 @@ class Player:
 
         Pin(MODE, Pin.OUT, value=1)
 
-        sysclk = freq()
-        # Two instructions per byte, one byte per CLOCKS_PER_BYTE pixel clocks.
-        pio_freq = sysclk // (PIXEL_DIV * CLOCKS_PER_BYTE // 2)
+        # Two instructions per byte, one byte per CLOCKS_PER_BYTE pixel clocks,
+        # ratioed off the pixel clock actually achieved by clock_project_PWM --
+        # not off a fixed assumed divider. clock_project_PWM can retune the
+        # RP2350's own system clock to whatever divides most cleanly to the
+        # target (ttboard/demoboard.py _get_best_rp2040_freq), so the real
+        # divisor from sysclk to pixel clock isn't guaranteed in advance.
+        pio_freq = pixel_hz // (CLOCKS_PER_BYTE // 2)
         self.sm = rp2.StateMachine(
             0,
             push_bytes,
@@ -148,12 +157,21 @@ class Player:
 
 def main(path="video.seg", video_fps=24.0):
     from ttboard.demoboard import DemoBoard
+    import ttboard.fpga.fabricfoxv2 as fpgaloader
 
     tt = DemoBoard.get()
-    tt.shuttle.tt_um_multi_seg_monitor.enable()
-    tt.clock_project_PWM(freq() // PIXEL_DIV)
+    # tt.shuttle.tt_um_multi_seg_monitor.enable() depends on the demoboard's
+    # FPGA-carrier auto-detect (reads a dedicated GPIO), which is unreliable on
+    # this board -- it falls back to the ASIC shuttle mux and the name lookup
+    # fails. Push the bitstream directly instead; this is all .enable() does
+    # for an FPGA target.
+    tt.pins.safe_bidir()
+    fpgaloader.spi_transferPIO("/bitstreams/tt_um_multi_seg_monitor.bin")
 
-    player = Player(path, video_fps)
+    pwm = tt.clock_project_PWM(PIXEL_HZ)
+    pixel_hz = pwm.freq()  # actually achieved, may differ from PIXEL_HZ
+
+    player = Player(path, video_fps, pixel_hz)
     try:
         while True:
             player.service()

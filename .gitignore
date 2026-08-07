@@ -8,3 +8,4 @@ test/frame.png
 __pycache__/
 test/frame_stream.png
 *.seg
+videos/

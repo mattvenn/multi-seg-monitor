@@ -45,12 +45,15 @@ module tb ();
         .rst_n   (rst_n)
     );
 
-    // Tiny VGA pinout
-    wire       hs   = uo_out[7];
-    wire       vs   = uo_out[3];
-    wire [1:0] px_r = {uo_out[0], uo_out[4]};
-    wire [1:0] px_g = {uo_out[1], uo_out[5]};
-    wire [1:0] px_b = {uo_out[2], uo_out[6]};
+    // Digilent PmodVGA pinout (4 bits/channel), spanning uo_out and uio --
+    // see src/tt_um_multi_seg_monitor.v. hsync/vsync moved off uo_out onto
+    // uio[4:5] when strobe/mode moved onto uio[6:7] to make room for PmodVGA's
+    // second connector on the low 6 bits of uio.
+    wire       hs   = uio_out[4];
+    wire       vs   = uio_out[5];
+    wire [3:0] px_r = uo_out[3:0];
+    wire [3:0] px_g = uio_out[3:0];
+    wire [3:0] px_b = uo_out[7:4];
 
     // Pixel position measured from the sync edges, so the capture depends only
     // on what leaves the chip.  640x480@72: from the falling edge of hsync comes
@@ -132,7 +135,7 @@ module tb ();
         // a non-blocking one, so on the closing cycle dumping still reads high
         // against an already closed handle.  Test the handle, not just the flag.
         if (dumping && ppm != 0 && px_active)
-            $fwrite(ppm, "%0d %0d %0d\n", px_r * 85, px_g * 85, px_b * 85);
+            $fwrite(ppm, "%0d %0d %0d\n", px_r * 17, px_g * 17, px_b * 17);
     end
 
 endmodule
