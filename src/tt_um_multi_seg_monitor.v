@@ -32,16 +32,21 @@ module tt_um_multi_seg_monitor (
     assign uo_out[6] = grey[0];  // B0
     assign uo_out[7] = hsync;
 
+    // Stream port: a byte on ui_in, strobed by uio[0].  uio[1] selects between the
+    // internal generator and streamed data.  See SPEC.md section 7.
     multi_seg_monitor core (
-        .clk        (clk),
-        .rst_n      (rst_n),
-        .hsync      (hsync),
-        .vsync      (vsync),
-        .level      (level)
+        .clk         (clk),
+        .rst_n       (rst_n),
+        .stream_data (ui_in),
+        .stream_stb  (uio_in[0]),
+        .stream_mode (uio_in[1]),
+        .hsync       (hsync),
+        .vsync       (vsync),
+        .level       (level)
     );
 
     // verilator lint_off UNUSEDSIGNAL
-    wire _unused = &{ena, ui_in, uio_in, 1'b0};
+    wire _unused = &{ena, uio_in[7:2], 1'b0};
     // verilator lint_on UNUSEDSIGNAL
 
 endmodule

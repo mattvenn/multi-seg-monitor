@@ -11,11 +11,14 @@
 // produces a picture with no external data at all.
 //
 module multi_seg_monitor (
-    input  wire       clk,      // 31.5 MHz pixel clock
+    input  wire       clk,          // 31.5 MHz pixel clock
     input  wire       rst_n,
+    input  wire [7:0] stream_data,  // ui_in
+    input  wire       stream_stb,   // uio[0], asynchronous
+    input  wire       stream_mode,  // uio[1]: 0 = internal generator, 1 = stream
     output reg        hsync,
     output reg        vsync,
-    output wire [5:0] level     // native 6 bit intensity
+    output wire [5:0] level         // native 6 bit intensity
     );
 
     // Grid geometry, fixed at synthesis (SPEC.md section 1).
@@ -84,7 +87,12 @@ module multi_seg_monitor (
     // pixels of the current one.  Column 0 of each row is fetched during the left
     // margin.
     // ------------------------------------------------------------------
-    wire render_buf = row[0];
+    // Four row buffers, not two.  The 1 kB macro was already being bought for
+    // 416 B, and the spare capacity buys timing freedom instead: the host may run
+    // between one and three rows ahead rather than being pinned to exactly one.
+    // That is the difference between a host that has to track every row boundary
+    // and one that can free-run at a fixed rate (SPEC.md section 4.3).
+    wire [1:0] render_buf = row[1:0];
 
     wire       fetch_en   = cell_x ? (cx < 4)     : (x_px < 4);
     wire [5:0] fetch_col  = cell_x ? (col + 1'b1) : 6'd0;
@@ -97,6 +105,13 @@ module multi_seg_monitor (
         fetch_en_d   <= fetch_en;
         fetch_byte_d <= fetch_byte;
     end
+
+    // Reads take 4 of every 12 cycles to prefetch the next digit, so writes have
+    // the other 8 -- about 21 MB/s against the 492 kB/s a source actually needs.
+    // Reads always win, which is what keeps the one-access-per-cycle guarantee
+    // the memory wrapper depends on (SPEC.md section 8.1).
+    wire lb_re    = fetch_en;
+    wire wr_grant = !lb_re;
 
     wire [7:0] lb_rdata;
     reg [31:0] next_digit;
@@ -122,45 +137,46 @@ module multi_seg_monitor (
     // screen exercises all 16 patterns, all 8 segments, the whole grid and the
     // gamma LUT.
     //
-    // Writes happen only during horizontal blanking, which is what keeps them
-    // clear of the renderer's reads.  208 bytes per row against 192 blanking
-    // cycles per line over 16 lines is not close to tight.
+    // Row N+1 is built while row N is on screen, into the buffer half that is not
+    // being read.  Writes take whatever cycles the renderer is not using, so a
+    // row's 208 bytes are placed long before that row is needed.
     // ------------------------------------------------------------------
     reg [4:0] gen_row;
     reg [7:0] gen_ptr;
-    reg       gen_buf;
+    reg [1:0] gen_buf;
     reg       gen_busy;
     reg [7:0] frame_ctr;
     reg       vsync_d;
 
-    wire gen_we = gen_busy && !h_active;
+    wire frame_start = vsync_d && !vga_vsync;
+    wire gen_grant   = wr_grant && !stream_mode && gen_busy;
 
     always @(posedge clk) begin
         if (!rst_n) begin
             gen_row   <= 0;
             gen_ptr   <= 0;
-            gen_buf   <= 0;
+            gen_buf   <= 2'd0;
             gen_busy  <= 0;
             frame_ctr <= 0;
             vsync_d   <= 1'b1;
         end else begin
             vsync_d <= vga_vsync;
 
-            if (vsync_d && !vga_vsync) begin
+            if (frame_start) begin
                 // Frame start: row 0 has to be ready before the first active
                 // line, so it is built during vertical blanking.
                 gen_row   <= 0;
-                gen_buf   <= 0;
+                gen_buf   <= 2'd0;
                 gen_ptr   <= 0;
                 gen_busy  <= 1'b1;
                 frame_ctr <= frame_ctr + 1'b1;
             end else if (v_active && cy == 0 && x_px == 0 && row < ROWS - 1) begin
                 // Start of digit row N: build row N+1 into the other buffer.
                 gen_row  <= row + 1'b1;
-                gen_buf  <= ~row[0];
+                gen_buf  <= row[1:0] + 2'd1;
                 gen_ptr  <= 0;
                 gen_busy <= 1'b1;
-            end else if (gen_we) begin
+            end else if (gen_grant) begin
                 if (gen_ptr == ROW_BYTES - 1)
                     gen_busy <= 1'b0;
                 gen_ptr <= gen_ptr + 1'b1;
@@ -189,12 +205,39 @@ module multi_seg_monitor (
     wire [7:0] gen_data = {gen_mask[seg_hi] ? gen_int : 4'h0,
                            gen_mask[seg_lo] ? gen_int : 4'h0};
 
-    line_buffer #(.AW(9)) lb (
+    // ------------------------------------------------------------------
+    // Stream port and write arbitration
+    // ------------------------------------------------------------------
+    wire       str_req;
+    wire [9:0] str_waddr;
+    wire [7:0] str_wdata;
+    wire       str_grant = wr_grant && stream_mode && str_req;
+
+    stream_in #(
+        .ROW_BYTES (ROW_BYTES),
+        .ROWS      (ROWS)
+    ) stream (
+        .clk         (clk),
+        .rst_n       (rst_n),
+        .data        (stream_data),
+        .strobe      (stream_stb),
+        .frame_start (frame_start),
+        .req         (str_req),
+        .grant       (str_grant),
+        .waddr       (str_waddr),
+        .wdata       (str_wdata)
+    );
+
+    wire       lb_we    = stream_mode ? str_grant : gen_grant;
+    wire [9:0] lb_waddr = stream_mode ? str_waddr : {gen_buf, gen_ptr};
+    wire [7:0] lb_wdata = stream_mode ? str_wdata : gen_data;
+
+    line_buffer #(.AW(10)) lb (
         .clk   (clk),
-        .we    (gen_we),
-        .waddr ({gen_buf, gen_ptr}),
-        .wdata (gen_data),
-        .re    (fetch_en),
+        .we    (lb_we),
+        .waddr (lb_waddr),
+        .wdata (lb_wdata),
+        .re    (lb_re),
         .raddr ({render_buf, fetch_col, fetch_byte}),
         .rdata (lb_rdata)
     );

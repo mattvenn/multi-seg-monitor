@@ -8,6 +8,7 @@ VERILOG_SOURCES += $(SRC_DIR)/VgaSyncGen.v
 VERILOG_SOURCES += $(SRC_DIR)/line_buffer.v
 VERILOG_SOURCES += $(SRC_DIR)/seg7_rom.v
 VERILOG_SOURCES += $(SRC_DIR)/gamma.v
+VERILOG_SOURCES += $(SRC_DIR)/stream_in.v
 VERILOG_SOURCES += $(PWD)/tb.v
 
 COMPILE_ARGS += -g2012

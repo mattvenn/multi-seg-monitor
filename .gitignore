@@ -6,3 +6,5 @@ test/frame.ppm
 test/frame.png
 *.vcd
 __pycache__/
+test/frame_stream.png
+*.seg

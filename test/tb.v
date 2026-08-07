@@ -109,6 +109,12 @@ module tb ();
                 tb_vc <= tb_vc + 1'b1;
         end
 
+        // Dropping dump_en arms the next capture, so more than one test can ask
+        // for a frame in the same simulation.  The reset task does this, which is
+        // why no test needs to lower it by hand.
+        if (!dump_en)
+            dump_done <= 1'b0;
+
         if (vsync_d && !vs) begin
             if (dump_en && !dumping && !dump_done) begin
                 ppm = $fopen("frame.ppm", "w");
@@ -122,7 +128,10 @@ module tb ();
             end
         end
 
-        if (dumping && px_active)
+        // `ppm` is cleared with a blocking assignment while `dumping` clears with
+        // a non-blocking one, so on the closing cycle dumping still reads high
+        // against an already closed handle.  Test the handle, not just the flag.
+        if (dumping && ppm != 0 && px_active)
             $fwrite(ppm, "%0d %0d %0d\n", px_r * 85, px_g * 85, px_b * 85);
     end
 

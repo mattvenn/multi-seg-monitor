@@ -121,14 +121,19 @@ being drawn.
 | Parameter | Value |
 |---|---|
 | One digit-row | 208 B (1,664 bits) |
-| Double-buffered | 416 B |
+| Four buffers | 832 B (1 kB of address space) |
 | Load window | one digit-row = 16 scanlines = 423 µs |
 | Required load rate | **3.9 Mbit/s** |
 
-Double-buffered: the renderer reads one half while the source fills the other, swapping
-at the digit-row boundary. Single-buffering would require reloading inside one blank
-scanline — 63 Mbit/s, sixteen times the double-buffered rate, for no benefit once the
-buffer lives in a macro.
+**Four buffers, not two.** Two is the minimum that works — the renderer reads one
+while the source fills the other — but it pins the source to a lead of exactly one
+row, which means tracking every row boundary. A 1 kB macro was already being bought
+for 416 B, so the spare capacity goes on timing freedom instead: with four buffers the
+source may run anywhere between one and three rows ahead, which a fixed byte rate
+achieves without ever looking at hsync (§4.3).
+
+Single-buffering would require reloading inside one blank scanline — 63 Mbit/s,
+sixteen times the rate, for no benefit once the buffer lives in a macro.
 
 The line buffer is what keeps display geometry inside the chip. Sources send *digits*,
 never scanlines, so host software stays independent of cell size, segment layout and
@@ -184,15 +189,30 @@ Long-running playback comes from the RP2350's own flash rather than a flash Pmod
 same capability, no silicon, and RLE or any other compression is a software choice
 instead of an RTL one.
 
-### 4.3 Stream format
+### 4.3 Stream format and pacing
 
-**OPEN.** Word layout to be defined. Proposed: the host pushes bytes continuously and
-the chip resets its write pointer on vsync, so the link is self-synchronising and any
-glitch heals within one frame. Byte *n* of a row addresses digit *n*/4, byte *n*%4.
+A byte on `ui_in`, latched on the rising edge of the strobe. Bytes fill the frame in
+order: byte *n* is digit *n*/4, nibble pair *n*%4, 208 bytes per row, 6,240 per frame.
+The chip's write pointer resets on vsync, so the link is self-synchronising — a lost
+or extra byte costs one frame and then corrects itself.
 
-Control (mode, scale, brightness) can now go on pins rather than in-band — dropping
-flash freed 7 of the 8 `uio` pins, so the earlier argument that pins were too scarce
-no longer holds.
+**Pacing falls out of the geometry.** A digit row is 16 scanlines and 208 bytes:
+
+```
+16 × 832 / 208 = 64 pixel clocks per byte, exactly
+```
+
+The division has no remainder, so a source running at a fixed byte rate tracks the
+raster indefinitely without resynchronising. Vertical blanking gives it a head start
+of ~2 rows (25,792 clocks ÷ 64 = 403 bytes), and from there the two advance together.
+Four buffers make a lead of 1–3 rows safe, so no row-by-row handshake is needed.
+
+Both clocks derive from the RP2350's system clock — it generates the chip's pixel
+clock — so the ratio is exact rather than merely close, and cannot drift.
+
+Control (mode, scale, brightness) goes on pins rather than in-band: dropping flash
+freed 7 of the 8 `uio` pins, so the earlier argument that pins were too scarce no
+longer holds.
 
 ---
 
@@ -300,18 +320,20 @@ needed, and because `ui_in[0..7]` maps to contiguous RP2350 GPIO17–24 — a si
 
 ## 8. Memory
 
-Requirement is **416 B**, which every candidate PDK can satisfy. Foundry choice is
-therefore not an architectural constraint — select the shuttle on schedule and cost.
+Requirement is **832 B** (four row buffers, §3.1), addressed as 1 kB. Foundry choice
+is still not an architectural constraint — select the shuttle on schedule and cost —
+though gf180 now needs four instances rather than two.
 
 | PDK | Candidate | Notes |
 |---|---|---|
 | IHP sg13g2 | `RM_IHPSG13_1P_1024x8` | 1 kB, fits 2×2 tiles, silicon-proven (ttihp0p2) |
-| gf180 | `sram256x8` × 2 | 256 B each |
+| gf180 | `sram256x8` × 4 | 256 B each |
 | sky130 | OpenRAM / Sylvain's register file | register file is the proven option |
 | — | flip-flops | ~4.8 tiles single-buffered; comparable area to a macro but 208 B instead of 1 kB |
 
 A 1 kB macro is the natural fit: it costs about the same area as a flop-based single
-buffer while providing double-buffering plus ~3 digit-rows of jitter slack.
+buffer, and its full capacity is now used — the four buffers are what let the host
+free-run rather than handshake every row.
 
 ### 8.1 Portability rules
 
@@ -403,7 +425,6 @@ implemented as of stage 1.
 |---|---|---|
 | # | Decision | Blocks |
 |---|---|---|
-| — | Stream word layout and framing | host firmware |
 | — | Internal generator: keep clock mode, or test pattern only | RTL |
 | — | Mitred vs square segment ends | synthesis sweep |
 | — | Intensity depth if 4-bit bands visibly | format, alignment |

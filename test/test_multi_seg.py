@@ -5,13 +5,17 @@ The frame is captured to a PPM by the Verilog testbench and validated here, then
 written out as a PNG so the geometry can be iterated by eye without hardware.
 """
 
-import struct
-import zlib
+import os
+import sys
 
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles, FallingEdge, RisingEdge
 from cocotb.utils import get_sim_time
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+import png  # noqa: E402
+import segments  # noqa: E402
 
 # 640x480 @ 72Hz, 31.5 MHz pixel clock -- SPEC.md section 6
 CLK_PS = 31746  # 1 / 31.5 MHz
@@ -156,8 +160,105 @@ async def test_render_frame(dut):
     frac = total / (width * height)
     assert 0.05 < frac < 0.60, f"lit fraction {frac:.3f} is implausible"
 
-    write_png("frame.png", width, height, px)
+    png.write_png("frame.png", width, height, px)
     dut._log.info("frame ok: %.1f%% of pixels lit, wrote frame.png", frac * 100)
+
+
+# --------------------------------------------------------------------------
+# Stream port
+#
+# uio[0] is the strobe, uio[1] selects streamed data over the internal generator.
+# --------------------------------------------------------------------------
+UIO_IDLE = 0b10
+UIO_STROBE = 0b11
+
+# One digit row is 16 scanlines and 208 bytes, so a byte every 64 pixel clocks
+# tracks the raster exactly.  The division is exact, which is what lets the host
+# free-run instead of resynchronising every row.
+BYTE_PERIOD = CELL_H * H_TOTAL // segments.ROW_BYTES
+
+
+async def push_byte(dut, value):
+    dut.ui_in.value = value
+    await ClockCycles(dut.clk, 2)
+    dut.uio_in.value = UIO_STROBE
+    await ClockCycles(dut.clk, 4)
+    dut.uio_in.value = UIO_IDLE
+    await ClockCycles(dut.clk, BYTE_PERIOD - 6)
+
+
+async def host_stream(dut, frame, frames):
+    """
+    Emulates the RP2350 pacing described in SPEC.md section 4.3.
+
+    Restart at vsync, then push bytes at a fixed rate. The vertical blanking
+    interval gives a head start of about two rows, and from there the byte rate
+    and the raster advance together, so the host stays between one and three rows
+    ahead for the whole frame without ever looking at hsync.
+
+    Bounded rather than free-running: a coroutine still parked on a trigger when
+    cocotb tears the simulation down segfaults Icarus.
+    """
+    for _ in range(frames):
+        await FallingEdge(dut.vs)
+        for byte in frame:
+            await push_byte(dut, byte)
+
+
+def make_test_frame():
+    """Every segment a different intensity, varying across the grid."""
+    data = bytearray()
+    for row in range(segments.ROWS):
+        for col in range(segments.COLS):
+            data += segments.pack_digit([(col + row + s) & 0xF for s in range(8)])
+    return bytes(data)
+
+
+@cocotb.test()
+async def test_stream_frame(dut):
+    """Push a frame in over the stream port and read it back off the screen."""
+    cocotb.start_soon(Clock(dut.clk, CLK_PS, unit="ps").start())
+    await reset(dut)
+    dut.uio_in.value = UIO_IDLE
+
+    frame = make_test_frame()
+    assert len(frame) == segments.FRAME_BYTES
+
+    cocotb.start_soon(host_stream(dut, frame, frames=7))
+
+    # Let the host get into step, then capture.
+    await ClockCycles(dut.clk, 2 * H_TOTAL * V_TOTAL)
+    dut.dump_en.value = 1
+    await ClockCycles(dut.clk, 3 * H_TOTAL * V_TOTAL)
+
+    width, height, px = read_ppm("frame.ppm")
+
+    def level_at(x, y):
+        # The testbench writes 2 bit levels scaled by 85.
+        return px[(y * width + x) * 3] // 85
+
+    bad = []
+    for row in range(segments.ROWS):
+        for col in range(segments.COLS):
+            off = segments.digit_offset(col, row)
+            sent = segments.unpack_digit(frame[off : off + 4])
+            for seg in range(8):
+                x, y = segments.segment_centre(col, row, seg)
+                want = segments.GAMMA[sent[seg]] >> 4
+                got = level_at(x, y)
+                if got != want:
+                    bad.append((col, row, segments.SEGMENTS[seg][0], sent[seg], want, got))
+
+    assert not bad, (
+        f"{len(bad)} of {segments.ROWS * segments.COLS * 8} segments wrong, "
+        f"first few: {bad[:5]}"
+    )
+
+    png.write_png("frame_stream.png", width, height, px)
+    dut._log.info(
+        "stream ok: %d segments round-tripped, wrote frame_stream.png",
+        segments.ROWS * segments.COLS * 8,
+    )
 
 
 def read_ppm(path):
@@ -170,25 +271,3 @@ def read_ppm(path):
         f"got {len(px)} samples, expected {width * height * 3}"
     )
     return width, height, px
-
-
-def write_png(path, width, height, px):
-    """Minimal 8 bit RGB PNG writer, so the tests need no imaging library."""
-    raw = b"".join(
-        b"\x00" + bytes(px[y * width * 3 : (y + 1) * width * 3])
-        for y in range(height)
-    )
-
-    def chunk(tag, data):
-        body = tag + data
-        return (
-            struct.pack(">I", len(data))
-            + body
-            + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
-        )
-
-    with open(path, "wb") as f:
-        f.write(b"\x89PNG\r\n\x1a\n")
-        f.write(chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)))
-        f.write(chunk(b"IDAT", zlib.compress(raw, 9)))
-        f.write(chunk(b"IEND", b""))

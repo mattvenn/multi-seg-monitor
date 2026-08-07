@@ -19,18 +19,19 @@ project:
     - line_buffer.v
     - seg7_rom.v
     - gamma.v
+    - stream_in.v
 
 # The pinout of your project. Leave unused pins blank. DO NOT delete or add any pins.
 pinout:
   # Inputs
-  ui[0]: ""
-  ui[1]: ""
-  ui[2]: ""
-  ui[3]: ""
-  ui[4]: ""
-  ui[5]: ""
-  ui[6]: ""
-  ui[7]: ""
+  ui[0]: "stream data 0"
+  ui[1]: "stream data 1"
+  ui[2]: "stream data 2"
+  ui[3]: "stream data 3"
+  ui[4]: "stream data 4"
+  ui[5]: "stream data 5"
+  ui[6]: "stream data 6"
+  ui[7]: "stream data 7"
 
   # Outputs (Tiny VGA pmod)
   uo[0]: "R1"
@@ -43,8 +44,8 @@ pinout:
   uo[7]: "hsync"
 
   # Bidirectional pins
-  uio[0]: ""
-  uio[1]: ""
+  uio[0]: "stream strobe"
+  uio[1]: "stream mode select"
   uio[2]: ""
   uio[3]: ""
   uio[4]: ""
