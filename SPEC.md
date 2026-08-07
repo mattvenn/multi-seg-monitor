@@ -88,7 +88,7 @@ Arbitrary segment patterns — no BCD, no hardware digit decode in the main data
 
 Nibble ordering within the 32-bit word, low to high: **a, b, c, d, e, f, g, DP**.
 Byte *k* therefore carries segment 2*k* in its low nibble and 2*k*+1 in its high
-nibble. This is fixed — host software and flash images depend on it.
+nibble. This is fixed — host software depends on it.
 
 ### 2.1 Gamma
 
@@ -113,8 +113,7 @@ being drawn.
   source mux ──> line buffer (double) ──> segment renderer ──> gamma ──> 6-bit out
        │                                        ▲
   internal gen                            cell coords
-  QSPI flash                              from VGA timing
-  RP2350
+  RP2350                                  from VGA timing
 ```
 
 ### 3.1 Line buffer
@@ -128,11 +127,12 @@ being drawn.
 
 Double-buffered: the renderer reads one half while the source fills the other, swapping
 at the digit-row boundary. Single-buffering would require reloading inside one blank
-scanline (63 Mbit/s), which only QSPI could sustain and with no margin.
+scanline — 63 Mbit/s, sixteen times the double-buffered rate, for no benefit once the
+buffer lives in a macro.
 
 The line buffer is what keeps display geometry inside the chip. Sources send *digits*,
-never scanlines, so host software and flash images stay independent of cell size,
-segment layout and scale factor.
+never scanlines, so host software stays independent of cell size, segment layout and
+scale factor.
 
 ### 3.2 Renderer
 
@@ -149,14 +149,15 @@ the gamma LUT. Roughly 8 constant range comparators, 7 ANDs, one 8-way select.
 
 ## 4. Data sources
 
-One always-streaming input behind a source mux. All three feed the same line-buffer
-port; they are modes, not separate designs.
+One always-streaming input behind a source mux. Both feed the same line-buffer port;
+they are modes, not separate designs.
 
 | Source | Use | Notes |
 |---|---|---|
 | Internal generator | standalone, bring-up | clock / counter, no external data |
-| QSPI flash | standalone installation | no host required |
-| RP2350 | host-driven, live video | streams from its own SRAM |
+| RP2350 | everything else | streams from its own SRAM or flash |
+
+QSPI flash was a third source and was dropped — see §13.
 
 ### 4.1 Internal generator
 
@@ -167,15 +168,7 @@ stream interface is broken — the primary silicon bring-up safety net.
 **OPEN** — scope: clock only, or also a free-running counter and a number taken from
 the digital inputs.
 
-### 4.2 QSPI flash
-
-Follows the approach proven in silicon by `tt_um_MichaelBell_rle_vga` (ttsky25a,
-single tile): W25Q128JV or compatible, h6B Fast Read Quad Output.
-
-Capacity at 6.24 kB/frame on a 16 MB part: **~2,560 frames ≈ 35 s at 72 Hz,
-uncompressed.** RLE would extend this considerably.
-
-### 4.3 RP2350
+### 4.2 RP2350
 
 Holds the frame in its own SRAM (520 kB available; a frame is 6.24 kB) and re-streams
 it every frame via PIO + DMA. From the host's perspective this restores "write once,
@@ -187,11 +180,19 @@ it persists" — the persistence lives in the MCU rather than the chip.
 Live video from a PC over USB full-speed: 454 kB/s against ~1 MB/s practical, **45%
 utilisation.** USB frame jitter is absorbed by double-buffering in RP2350 SRAM.
 
-### 4.4 Stream format
+Long-running playback comes from the RP2350's own flash rather than a flash Pmod:
+same capability, no silicon, and RLE or any other compression is a software choice
+instead of an RTL one.
 
-**OPEN.** Word layout to be defined. Recommendation: carry mode, colour and
-brightness control **in-band** rather than on config pins — pins are scarce, and
-in-band control lets the source change parameters per frame.
+### 4.3 Stream format
+
+**OPEN.** Word layout to be defined. Proposed: the host pushes bytes continuously and
+the chip resets its write pointer on vsync, so the link is self-synchronising and any
+glitch heals within one frame. Byte *n* of a row addresses digit *n*/4, byte *n*%4.
+
+Control (mode, scale, brightness) can now go on pins rather than in-band — dropping
+flash freed 7 of the 8 `uio` pins, so the earlier argument that pins were too scarce
+no longer holds.
 
 ---
 
@@ -243,7 +244,7 @@ the `ttihp0p4-vga-clock` project, so the timing is already proven on hardware.
 | Path | Required | Available | Utilisation |
 |---|---|---|---|
 | Line buffer fill | 3.9 Mbit/s | — | — |
-| QSPI flash | 3.9 Mbit/s | ~96 Mbit/s | 4% |
+| RP2350 push port | 492 kB/s (8 bit) | PIO ≥25 MB/s | 2% |
 | USB full-speed | 3.6 Mbit/s | ~8 Mbit/s | 45% |
 | Line buffer read | ~2.6 MHz | macro ≥100 MHz | 3% |
 
@@ -255,7 +256,8 @@ against it.
 
 ## 7. Pin assignment
 
-`uo_out` is fully committed. The remaining banks depend on an open decision.
+`uo_out` is fully committed to video. The other two banks carry the stream port and
+configuration.
 
 **Native mode** — custom 6-bit Pmod (§5.1):
 
@@ -280,15 +282,19 @@ Note this yields **4 intensity levels, not 64.** The prototype can validate geom
 streaming, timing and protocol, but *not* the smooth-fading goal that motivated
 per-segment brightness. That requires the custom Pmod.
 
-**OPEN — D6, stream pin scheme.** Two options:
+**Stream port.** Dropping flash freed the bidirectional bank, so the port is a full
+byte wide and needs no contention management:
 
-- **A — separate push port.** `ui_in[5:0]` = data[3:0] + clk + valid. Flash keeps
-  `uio[5:0]`. Simple PIO program. Leaves 2 `ui_in` + 2 `uio` for config.
-- **B — shared wires.** RP2350 holds flash CS high and drives the same `uio[5:0]`
-  with the simpler protocol; a mode bit selects which the chip speaks. Frees all of
-  `ui_in` for config, at the cost of CS contention management.
+| Bank | Assignment |
+|---|---|
+| `ui_in[7:0]` | stream data, one byte per transfer |
+| `uio[0]` | strobe — data latched on the rising edge |
+| `uio[7:1]` | mode / config / spare |
 
-B is preferred for pin comfort.
+Data sits on `ui_in` because the port is push-only, so no bidirectional handling is
+needed, and because `ui_in[0..7]` maps to contiguous RP2350 GPIO17–24 — a single PIO
+`out pins, 8`. A byte-wide port halves the strobe rate against the 4-bit alternative:
+492 kHz rather than 984 kHz, both far inside PIO's reach.
 
 ---
 
@@ -339,7 +345,7 @@ capacity goes deliberately unused so the prototype stays faithful.
 
 The ASIC is the tighter target throughout. Open toolchain (yosys / nextpnr /
 icestorm) on iCEBreaker or UPduino allows the real RTL to be run against a real
-monitor, real QSPI flash and a real RP2350 before tapeout.
+monitor and a real RP2350 before tapeout.
 
 ---
 
@@ -351,15 +357,23 @@ monitor, real QSPI flash and a real RP2350 before tapeout.
 | Coordinate + scale decode | 120 |
 | Segment zone decode (+ mitre) | 200 |
 | Gamma LUT | 100 |
-| Stream interface FSM | 400 |
+| Stream interface (byte push + write pointer) | 150 |
 | Memory controller / arbiter | 200 |
 | Internal generator (incl. 7-seg ROM) | 200 |
 | Glue | 200 |
-| **Logic total** | **~1,500 ≈ 1.5 tiles** |
+| **Logic total** | **~1,250 ≈ 1.25 tiles** |
 | Memory macro | ~4 tiles (2×2) |
-| **Total** | **~6 tiles** |
+| **Total** | **~5.5 tiles** |
 
 Target is ≤8 tiles; up to 4 tiles high is available.
+
+The stream interface was estimated at 400 cells while it had to speak QSPI. A byte
+push port with a write pointer is a fraction of that — one of the smaller reasons
+flash was dropped (§13), but it moves in the same direction as the rest.
+
+Stage 1, which is everything above except the stream interface, hardens to 384 iCE40
+logic cells and one EBR. FPGA cells do not map one-to-one onto standard cells, but it
+is the right order of magnitude and suggests the estimate is not optimistic.
 
 ---
 
@@ -370,9 +384,9 @@ cleanly.
 
 1. **Internal generator.** Proves VGA timing and the renderer with no external
    dependency. Produces a picture at power-on regardless of interface state.
-2. **QSPI flash.** Proves the streaming path standalone, along a route already
-   proven in TT silicon.
-3. **RP2350 push.** Adds host-driven and live video.
+2. **RP2350 push, static image.** Proves the stream port and the protocol at low
+   rate, with a picture that is easy to check by eye.
+3. **RP2350 streaming video.** Adds full-rate playback and live host video.
 
 Below that: cocotb for RTL, VGA playground for visual constants, UP5K as the final
 pre-tapeout verification platform.
@@ -387,15 +401,18 @@ implemented as of stage 1.
 
 | # | Decision | Blocks |
 |---|---|---|
-| D6 | Stream pin scheme — separate port (A) or shared wires (B) | RTL interface |
-| — | Stream word format; in-band vs pin control | host + flash format |
+| # | Decision | Blocks |
+|---|---|---|
+| — | Stream word layout and framing | host firmware |
 | — | Internal generator: keep clock mode, or test pattern only | RTL |
 | — | Mitred vs square segment ends | synthesis sweep |
 | — | Intensity depth if 4-bit bands visibly | format, alignment |
 
 Settled: foundry (D1) is dissolved by the 416 B requirement; D2 (memory macro) and
 D3 (line buffer) are decided; segment layout, nibble ordering, pixel clock and
-power-on behaviour are all fixed by the stage 1 implementation.
+power-on behaviour are all fixed by the stage 1 implementation. D6 dissolved when
+flash was dropped — with the bidirectional bank free there is no pin contention to
+arbitrate.
 
 Mitring cannot be judged on the prototype — at 1× the cell is 12×16 with 2 px
 segments, and a chamfer has nowhere to show. It only reads at 4× and 8×, so leave it
@@ -411,14 +428,14 @@ Recorded so the reasoning is not relitigated.
 1.56 kB, exceeding a 1 kB macro. Holding a full-spec frame needs ~2× 4 kB macros and
 lands at 16–32 tiles — a 3× bigger chip. Fitting a framebuffer in 8 tiles would mean
 dropping to 256 digits or losing per-segment brightness. Persistence is instead
-provided by the RP2350 re-streaming from its own SRAM, and standalone operation by
-flash and internal-generator modes. Streaming also self-heals: corruption lasts one
-frame (16 ms) rather than persisting until rewritten.
+provided by the RP2350 re-streaming from its own SRAM, and a picture without any
+host at all by the internal generator. Streaming also self-heals: corruption lasts
+one frame (14 ms) rather than persisting until rewritten.
 
 **No line buffer (per-scanline streaming).** Bandwidth is affordable — 20 Mbit/s
 sending only the 2–3 segments present on each scanline, 52 Mbit/s naive — but it
-forces the source to know the segment layout. That makes host software and flash
-images layout-specific, breaks the scale register (each scale needs a different
+forces the source to know the segment layout. That makes host software
+layout-specific, breaks the scale register (each scale needs a different
 scanline→segment mapping), and multiplies host reads by 16×. The ~4 tiles saved cost
 the clean host contract and format portability.
 
@@ -441,8 +458,26 @@ loses the grayscale-from-video capability that the reference installation relies
 
 **Gap-row reload trick.** Rendering the last scanline of each digit row blank to free
 the buffer for reload. Saved a buffer's worth of flops, but at 32 bits/digit the
-reload needs 52 Mbit/s inside one scanline — 54% of QSPI with no margin, and
-unusable from simpler interfaces. Made unnecessary by double-buffering in a macro.
+reload needs 63 Mbit/s inside one scanline, sixteen times the double-buffered rate.
+Made unnecessary by double-buffering in a macro.
+
+**QSPI flash as a data source.** A flash Pmod streaming frames directly to the chip,
+following `tt_um_MichaelBell_rle_vga`, which proves the approach works in TT silicon.
+It would have given ~35 s of uncompressed animation from a 16 MB part with no host.
+
+Dropped because the standalone case it serves does not exist. Every TT demoboard
+carries an RP2350B wired to all the chip's IO, so there is no deployment without a
+microcontroller — and that microcontroller has its own flash, 520 kB of SRAM, and can
+decompress in software far more flexibly than an RTL decoder. Flash mode duplicated,
+in silicon, a capability already present on the board.
+
+The cost was the scarcest resource: 6 of 8 bidirectional pins, plus a QSPI FSM whose
+read latency is fiddly enough that the reference design exposes three input pins just
+to tune it. Removing it dissolved D6, widened the stream port from 4 bits to 8, and
+left 7 `uio` pins free for configuration.
+
+The one scenario it would still serve is a custom installation PCB with no MCU. An
+RP2350 costs about a dollar and does strictly more than a flash chip there.
 
 ---
 
@@ -451,7 +486,9 @@ unusable from simpler interfaces. Made unnecessary by double-buffering in a macr
 - Tiny Tapeout VGA Pmod — https://tinytapeout.com/specs/pinouts/#vga-output
 - VGA playground — https://vga-playground.com/
 - ETR demoboard — https://tinytapeout.com/guides/get-started-demoboard-etr/
-- `tt_um_MichaelBell_rle_vga` — QSPI flash video streaming, 1 tile, silicon-proven
+- `tt_um_MichaelBell_rle_vga` — QSPI flash video streaming in 1 tile, silicon-proven.
+  The route this design considered and rejected (§13), kept here as the reference if
+  flash is ever revisited.
   https://tinytapeout.com/chips/ttsky25a/tt_um_MichaelBell_rle_vga
 - Sea of Segments — 1,536 digits, 5-bit grayscale, PocketBeagle + PRU, no framebuffer
   in the display. Closest real-world comparable. https://willga.llia.io/sea-of-segments/build/
