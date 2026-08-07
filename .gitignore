@@ -9,3 +9,13 @@ __pycache__/
 test/frame_stream.png
 *.seg
 videos/
+
+# Tiny Tapeout flow
+.DS_Store
+*.fst
+*.fst.hier
+runs
+tt_submission
+src/user_config.json
+src/config_merged.json
+test/gate_level_netlist.v

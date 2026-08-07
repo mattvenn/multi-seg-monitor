@@ -326,7 +326,7 @@ though gf180 now needs four instances rather than two.
 
 | PDK | Candidate | Notes |
 |---|---|---|
-| IHP sg13g2 | `RM_IHPSG13_1P_1024x8` | 1 kB, fits 2×2 tiles, silicon-proven (ttihp0p2) |
+| IHP sg13g2 | `RM_IHPSG13_1P_1024x8_c2_bm_bist` | 1 kB, silicon-proven (ttihp0p2). **Selected — see §8.2** |
 | gf180 | `sram256x8` × 4 | 256 B each |
 | sky130 | OpenRAM / Sylvain's register file | register file is the proven option |
 | — | flip-flops | ~4.8 tiles single-buffered; comparable area to a macro but 208 B instead of 1 kB |
@@ -350,6 +350,61 @@ Two rules prevent the FPGA passing where silicon would fail:
    relying on it.
 2. **Never assume initialised memory.** EBR can be initialised from the bitstream;
    ASIC SRAM powers up undefined. Clear the buffer explicitly at reset.
+
+### 8.2 IHP sg13g2 integration
+
+IHP is the first ASIC target, so `line_buffer.v` now carries the macro behind an
+`IHP_SRAM` define. Undefined it infers an array, which is what the FPGA and the
+default simulation use; defined it instantiates the macro. Nothing above the wrapper
+changes between the two.
+
+**Fit.** The macro is 336.46 × 146.88 µm (h × w), 49,419 µm². A TT IHP 4×2 block is
+854.40 × 313.74 µm, so it does **not** fit upright — 336.46 exceeds the 313.74 of
+height available. Rotated 90° it becomes 336.46 wide × 146.88 high and drops in with
+room to spare, leaving ~518 µm of width for logic. The same is true of the 2×2
+(419.52 × 313.74) this document previously claimed it fitted: true, but only rotated.
+
+**Pin settings**, matching `tt_um_urish_sram_test` on ttihp0p2 — the same macro and
+the only silicon-proven use of it:
+
+| Pin | Setting | Why |
+|---|---|---|
+| `A_DLY` | `1'b1` | Datasheet: "recommended setting: Tie to 1" |
+| `A_BM` | `8'hff` | Write every bit; the port is one byte wide |
+| `A_BIST_*` | tied low | BIST unused; `A_BIST_EN` low leaves the functional port in control |
+| `A_ADDR` | `re ? raddr : waddr` | One port, two callers; reads win, as upstream already arbitrates |
+| `A_MEN` | `re \| we` | **Diverges** from the proven design, which holds it at `rst_n` |
+
+Everything is active high and sampled on the rising edge, and `A_DOUT` is registered,
+so the macro matches the wrapper's one-cycle read with no extra pipeline stage.
+
+The `A_MEN` divergence is deliberate. Enabling only on a real access measures 27%
+duty over a frame (110,240 reads and 6,760 writes in 432,640 cycles) against 100% for
+a permanently enabled macro, which is most of the array's active power. It is legal —
+`MEN` low is "No Operation" in the datasheet's operation table — but it is an enable
+pattern the shuttle has not run. Tie `A_MEN` high if that trade ever looks wrong.
+
+**Write-through is the hazard.** `MEN`+`WEN`+`REN` together is not an error the macro
+reports; it writes `wdata` to `raddr` and returns it. That is a silently corrupted
+byte on its way to the screen, so the single-port guarantee in §8.1 is asserted in
+`tb.v` rather than assumed.
+
+**Synthesis sees a stub, simulation sees the model.** The PDK's own behavioural model
+cannot go into `source_files`: yosys cannot parse its `specify` block in any
+`read_verilog` mode, because the `$setuphold` calls use the empty-argument form.
+Defining `FUNCTIONAL` gets it past the parser but then offers yosys a behavioural
+1024×8 array to synthesise, which is the opposite of what the macro is for. So
+`src/RM_IHPSG13_1P_1024x8_c2_bm_bist.v` is a ports-only blackbox stub and the timing
+comes from the liberty files in `src/config.json`, while the real models live in
+`test/models/` for simulation. `tt_um_urish_sram_test` uses the same split.
+
+The define is what makes this worth doing: synthesised with `IHP_SRAM` the design is
+687 cells, 166 flip-flops and one macro; without it, **16,732 flip-flops**.
+
+**Verified equivalent, not verified in silicon.** Both builds were run for 900,000
+cycles in generator mode and again in stream mode, logging every output pin every
+cycle; the logs hash identically. That establishes the wrapper is transparent, not
+that the macro hardens — no place-and-route against the real LEF has been attempted.
 
 ---
 

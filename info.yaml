@@ -20,6 +20,10 @@ project:
     - seg7_rom.v
     - gamma.v
     - stream_in.v
+    # IHP foundry SRAM behavioural model. Blackboxed for synthesis via the lib in
+    # src/config.json; line_buffer.v only instantiates it when IHP_SRAM is defined,
+    # which config.json does for the ASIC build. See SPEC.md section 8.2.
+    - RM_IHPSG13_1P_1024x8_c2_bm_bist.v
 
 # The pinout of your project. Leave unused pins blank. DO NOT delete or add any pins.
 pinout:

@@ -138,5 +138,25 @@ module tb ();
             $fwrite(ppm, "%0d %0d %0d\n", px_r * 17, px_g * 17, px_b * 17);
     end
 
+    // SPEC.md section 8.1: the line buffer is single port on silicon, so `we`
+    // and `re` must never be high in the same cycle.  The inferred array used
+    // for simulation and FPGA does both happily, which is exactly the way an
+    // FPGA can pass where an ASIC would fail -- the IHP macro reads MEN+WEN+REN
+    // as write-through and would put wdata at raddr, silently corrupting a byte
+    // on its way to the screen.  Check it on every edge rather than trusting the
+    // arbitration upstream to stay correct.
+    //
+    // Reaches into the hierarchy, so it cannot survive synthesis: the gate level
+    // netlist has no `core.lb`.  The property is about the RTL's arbitration
+    // anyway, and if it holds there it holds in the netlist.
+`ifndef GL_TEST
+    always @(posedge clk) begin
+        if (rst_n && user_project.core.lb.we && user_project.core.lb.re) begin
+            $display("ERROR: line buffer read and write in the same cycle at %0t", $time);
+            $fatal(1);
+        end
+    end
+`endif
+
 endmodule
 `default_nettype wire

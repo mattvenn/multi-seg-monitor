@@ -2,6 +2,16 @@ SIM ?= icarus
 TOPLEVEL_LANG ?= verilog
 SRC_DIR = $(PWD)/../src
 
+# The macro's behavioural models are vendored in test/models rather than taken
+# from $PDK_ROOT, so an RTL run against the macro needs no PDK installed.  They
+# came from the same IHP-Open-PDK commit as the physical views -- see
+# macro/RM_IHPSG13_1P_1024x8_c2_bm_bist/README.md.
+MODEL_DIR = $(PWD)/models
+
+ifneq ($(GATES),yes)
+
+# RTL simulation.
+SIM_BUILD = sim_build/rtl
 VERILOG_SOURCES += $(SRC_DIR)/tt_um_multi_seg_monitor.v
 VERILOG_SOURCES += $(SRC_DIR)/multi_seg_monitor.v
 VERILOG_SOURCES += $(SRC_DIR)/VgaSyncGen.v
@@ -9,6 +19,38 @@ VERILOG_SOURCES += $(SRC_DIR)/line_buffer.v
 VERILOG_SOURCES += $(SRC_DIR)/seg7_rom.v
 VERILOG_SOURCES += $(SRC_DIR)/gamma.v
 VERILOG_SOURCES += $(SRC_DIR)/stream_in.v
+
+# Swap the inferred array for the IHP macro, which is what the ASIC build
+# hardens (src/config.json defines IHP_SRAM):
+#
+#     make IHP_SRAM=1
+#
+ifdef IHP_SRAM
+VERILOG_SOURCES += $(MODEL_DIR)/RM_IHPSG13_1P_1024x8_c2_bm_bist.v
+VERILOG_SOURCES += $(MODEL_DIR)/RM_IHPSG13_1P_core_behavioral_bm_bist.v
+COMPILE_ARGS += -DIHP_SRAM -DFUNCTIONAL
+endif
+
+else
+
+# Gate level simulation.  The netlist is copied in by the GDS action workflow.
+#
+# FUNCTIONAL is not optional for the macro.  Without it the model takes its
+# timing path, where the internal _DELAY signals are driven only as $setuphold
+# negative-check outputs -- Icarus leaves them undriven and the memory sees X on
+# every pin.
+SIM_BUILD = sim_build/gl
+COMPILE_ARGS += -DGL_TEST
+COMPILE_ARGS += -DFUNCTIONAL
+COMPILE_ARGS += -DSIM
+VERILOG_SOURCES += $(PDK_ROOT)/ihp-sg13g2/libs.ref/sg13g2_io/verilog/sg13g2_io.v
+VERILOG_SOURCES += $(PDK_ROOT)/ihp-sg13g2/libs.ref/sg13g2_stdcell/verilog/sg13g2_stdcell.v
+VERILOG_SOURCES += $(MODEL_DIR)/RM_IHPSG13_1P_1024x8_c2_bm_bist.v
+VERILOG_SOURCES += $(MODEL_DIR)/RM_IHPSG13_1P_core_behavioral_bm_bist.v
+VERILOG_SOURCES += $(PWD)/gate_level_netlist.v
+
+endif
+
 VERILOG_SOURCES += $(PWD)/tb.v
 
 COMPILE_ARGS += -g2012
