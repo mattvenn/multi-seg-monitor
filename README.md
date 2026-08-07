@@ -1,5 +1,7 @@
 # Multi Segment Monitor
 
+[![Made with Claude](https://img.shields.io/badge/Made%20with-Claude-D97757?logo=anthropic&logoColor=white)](https://claude.com/claude-code)
+
 Instead of putting hundreds of 7 segment displays together (which is awesome),
 take the short cut of using a VGA screen to simulate the displays.
 
