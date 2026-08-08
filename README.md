@@ -34,16 +34,20 @@ turns any clip into segment intensities.
 | Timing | 39.14 MHz max, passes at 31.5 MHz |
 | Tests | 4 cocotb + 3 converter, all passing, 3 frames against gold images |
 
-**Running on the FPGA breakout.** The internal generator and the stream port both
-work on hardware, driven from the demoboard — steps 1 and 2 of [Bring-up](#bring-up),
+**Working on the FPGA breakout.** The internal generator and the stream port both run
+on hardware, driven from the demoboard — steps 1 and 2 of [Bring-up](#bring-up),
 which is also where what that run cost is written down. Full rate video, step 3, has
 not been run.
 
-One thing remains unproven: the vsync handler in `firmware/seg_player.py` was
-rewritten to restart the DMA from its registers in a hard IRQ, and **that version has
-never been executed.** The bug it fixes is understood and reproduced in simulation —
-see the delay sweep below — so what is missing is a confirmation, not an
-investigation.
+**The vsync tearing is fixed.** `firmware/seg_player.py` takes the vsync interrupt
+with `hard=True`, which puts the DMA restart about 80 µs after the edge against a
+budget of roughly 450 µs. Measured on a scope, not inferred — see
+[If the picture tears](#if-the-picture-tears) for the captures and for why the
+handler, not the restart code, was the slow part.
+
+For the ASIC, the GDS builds, LVS matches and gate level simulation passes, but Tiny
+Tapeout's precheck fails on 2672 KLayout DRC violations. All of them are inside the
+IHP SRAM macro's own cells rather than in this design.
 
 # Building
 
@@ -93,7 +97,14 @@ the notes below are what that cost rather than what was expected to.
 missing `klayout` and `chevron` on the machine this was written on —
 `pip install -r requirements.txt` in that repo.
 
-**1. Internal generator, no firmware.** Leave `uio[1]` low and the design ignores the
+The prototype output is a **Digilent PmodVGA** across both output headers: R on
+`uo_out[3:0]`, B on `uo_out[7:4]`, G on `uio[3:0]`, hsync on `uio[4]` and vsync on
+`uio[5]`. The 6 bit intensity is truncated to 4 and replicated across all three
+channels, so the picture is grey at 16 levels rather than the native 64. Strobe and
+mode select sit on `uio[6]` and `uio[7]`, which is where PmodVGA leaves two pins not
+connected.
+
+**1. Internal generator, no firmware.** Leave `uio[7]` low and the design ignores the
 stream port entirely. You should get a 52x30 grid of hex digits scrolling diagonally
 with brightness bands across it. Compare against `test/gold/generator.png`, which is
 the same thing from simulation.
@@ -104,12 +115,15 @@ If this fails, in rough order of likelihood:
 |---|---|
 | Nothing at all, and the project never came up | `tt.shuttle.<name>.enable()` reads a dedicated GPIO to detect the FPGA carrier, and on this board that detect is unreliable — it falls back to the ASIC shuttle mux and the name lookup fails. `firmware/seg_player.py` pushes the bitstream with `spi_transferPIO` instead, which is all `.enable()` does for an FPGA target |
 | No signal / monitor out of range | The clock. Ask `clock_project_PWM` what it actually produced rather than assuming a divider: it retunes the RP2350's own sysclk to whatever divides most cleanly to the target, so the ratio from sysclk to pixel clock is not fixed. Anything derived from the pixel clock has to be derived from the value it returns |
-| Sync but no picture, or garbage | Pmod pinout. Only Tiny VGA is wired up (`uo_out[3]`=vsync, `uo_out[7]`=hsync); the VGA Clock pmod has a different order |
+| Sync but no picture, or garbage | Pmod pinout. Only PmodVGA is wired up, and it needs both headers — hsync and vsync are on `uio[4:5]`, not on `uo_out` at all. Tiny VGA and the VGA Clock pmod both have a different order |
 | Picture but sheared or rolling | VGA timing constants — but these come from `ttihp0p4-vga-clock`, which works, so suspect the clock first |
 
-**2. Streamed static image.** Set `uio[1]` high and push a single frame repeatedly.
-`tools/video2seg.py` on a still image gives you one. If the generator worked and this
-does not, the problem is in the stream port or the player, not the renderer.
+**2. Streamed static image.** Set `uio[7]` high and push a single frame repeatedly.
+`tools/video2seg.py` on a still image gives you one, and `tools/make_diag_pattern.py`
+gives you a frame built to make corruption countable rather than subtle — one segment
+per row keyed on `row % 4`, so stale data from the wrong line buffer slot lights the
+wrong segment instead of shifting a brightness. If the generator worked and this does
+not, the problem is in the stream port or the player, not the renderer.
 
 **3. Video.** Only after 2 is stable.
 
@@ -134,16 +148,35 @@ byte after vsync, 0 to 1000 µs, and writing a frame for each:
 | 600 µs | 108 bytes | tears from column 29 |
 | 800 µs | 9 bytes | tears from column 4 |
 
-So the budget from vsync to the first byte is **about 450 µs**. Two things to check
-against it, in this order:
+So the budget from vsync to the first byte is **about 450 µs**, and what blew it was
+the *dispatch*, not the handler body.
 
-1. **How long the vsync handler takes**, on a scope from vsync falling to the first
-   strobe. The first version of the player spent 580–600 µs here — over budget, hence
-   the tearing — because it aborted the DMA and reconfigured it through allocating
-   keyword calls. It now does three stores into a preallocated memoryview from a hard
-   IRQ, which should be tens of microseconds.
-2. **Interrupt latency**, if the handler is fast and it still tears. Measured under
-   10 µs on this platform, so it is not expected to be the problem.
+`Pin.irq` defaults to a soft IRQ, which does not run in the interrupt at all — it
+waits for `micropython.schedule()` to reach a bytecode boundary, and `service()`
+reads 6240 bytes off flash in one uninterruptible call. That routinely pushed the
+first strobe out to 500–600 µs. Passing `hard=True` dispatches from the interrupt
+itself and brings it to about 80 µs, comfortably inside budget, with the ordinary
+`dma.config()` body left alone.
+
+Both captures below are the same trigger on vsync falling, with the cursor pair set
+542 µs apart:
+
+![soft IRQ](docs/scope/instrumented_soft_irq.png)
+
+*Soft IRQ: nothing has moved by the 542 µs cursor, and the byte stream starts after
+it.*
+
+![hard IRQ](docs/scope/instrumented_hard_irq.png)
+
+*`hard=True`: the handler runs at the left edge of the window instead.*
+
+Rewriting the handler to poke the DMA registers directly was tried first and is not
+the answer. The restart code was never the slow part, and the register version broke
+the DMA trigger outright — no strobe and no data at all.
+
+If it ever tears again, measure from vsync falling to the first strobe before
+changing anything. Interrupt latency itself is under 10 µs on this platform, so it is
+not a plausible cause on its own.
 
 The signature, if you want to confirm the diagnosis rather than infer it: the tear
 starts at column ≈ lead/4 + 2.5 and walks right as the row is drawn, so digits show
@@ -155,7 +188,6 @@ from elsewhere, not as a repeat.
 
     tools/video2seg.py clip.mp4 video.seg --fps 24    # 6240 bytes per frame
     tools/seg2png.py video.seg preview.png --frame 30 # check it before deploying
-    tools/seg2png.py video.seg preview.png --levels 4 # as the Tiny VGA prototype
 
 Each of the 12480 segments averages the source pixels its own rectangle covers, in
 linear light — one sample per digit would throw away most of the resolution that
