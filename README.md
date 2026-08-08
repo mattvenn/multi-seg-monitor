@@ -30,23 +30,29 @@ turns any clip into segment intensities.
 | | |
 |---|---|
 | VGA | 640x480 @ 72 Hz, 31.5 MHz |
-| FPGA | 422 / 5280 logic cells (7%), 2 / 30 EBR |
-| Timing | 41.13 MHz max, passes at 31.5 MHz |
-| Tests | 4 cocotb + 3 converter tests, all passing |
+| FPGA | 431 / 5280 logic cells (8%), 2 / 30 EBR |
+| Timing | 39.14 MHz max, passes at 31.5 MHz |
+| Tests | 4 cocotb + 3 converter, all passing, 3 frames against gold images |
 
-**None of this has run on hardware yet.** Everything is verified in simulation: the
-stream test pushes a full frame in over the port and reads all 12480 segments back
-off the screen, so the protocol, the pacing and the packing are proven end to end —
-but the FPGA breakout has not been available to try it on. The MicroPython player in
-particular is written against the demoboard pinout and the `rp2` API without ever
-having been run.
+**Running on the FPGA breakout.** The internal generator and the stream port both
+work on hardware, driven from the demoboard — steps 1 and 2 of [Bring-up](#bring-up),
+which is also where what that run cost is written down. Full rate video, step 3, has
+not been run.
+
+One thing remains unproven: the vsync handler in `firmware/seg_player.py` was
+rewritten to restart the DMA from its registers in a hard IRQ, and **that version has
+never been executed.** The bug it fixes is understood and reproduced in simulation —
+see the delay sweep below — so what is missing is a confirmation, not an
+investigation.
 
 # Building
 
 Needs [oss-cad-suite](https://github.com/YosysHQ/oss-cad-suite-build) on the path.
 
-    make bitstream      # synth + place & route + pack, for the TT FPGA breakout
-    make test           # cocotb tests + converter tests
+    make bitstream            # synth + place & route + pack, for the TT FPGA breakout
+    make test                 # cocotb tests + converter tests
+    make -C test delay-sweep  # vsync latency sweep, ~9 min, writes frame_delay_*.png
+    make -C test gold         # rewrite the gold images after an intended change
 
 `make bitstream` mirrors `tt_fpga.py harden` so it runs without the tt-support-tools
 python environment. Deploying to the demoboard still needs the real tool:
@@ -58,10 +64,18 @@ can be iterated without hardware. That loop is what caught the first segment lay
 filling its whole cell — adjacent digits merged into each other and the grid was
 illegible.
 
+Three captures are also compared pixel for pixel against committed images in
+`test/gold/`, which is what catches a change in how the picture looks rather than a
+violation of a rule — a segment a pixel wide, a gamma entry off by one. A mismatch
+writes a `_diff.png` with the disagreeing pixels in red. After an intended change,
+`make -C test gold` rewrites them; look at what it produces before committing, as
+nothing else will.
+
 # Bring-up
 
-Nothing here has touched hardware. This is the order to try it in, chosen so each
-step adds one thing and a failure points somewhere specific.
+The order to try it in, chosen so each step adds one thing and a failure points
+somewhere specific. Steps 1 and 2 have been through this on the FPGA breakout, and
+the notes below are what that cost rather than what was expected to.
 
 **On a new machine.** The build needs two paths:
 
@@ -74,14 +88,15 @@ missing `klayout` and `chevron` on the machine this was written on —
 
 **1. Internal generator, no firmware.** Leave `uio[1]` low and the design ignores the
 stream port entirely. You should get a 52x30 grid of hex digits scrolling diagonally
-with brightness bands across it, at 4 grey levels. Compare against `test/frame.png`,
-which is the same thing from simulation.
+with brightness bands across it. Compare against `test/gold/generator.png`, which is
+the same thing from simulation.
 
 If this fails, in rough order of likelihood:
 
 | Symptom | Look at |
 |---|---|
-| No signal / monitor out of range | The clock. 31.5 MHz needs a sysclk that divides to it — 126 MHz / 4. Check what `clock_project_PWM` actually produced |
+| Nothing at all, and the project never came up | `tt.shuttle.<name>.enable()` reads a dedicated GPIO to detect the FPGA carrier, and on this board that detect is unreliable — it falls back to the ASIC shuttle mux and the name lookup fails. `firmware/seg_player.py` pushes the bitstream with `spi_transferPIO` instead, which is all `.enable()` does for an FPGA target |
+| No signal / monitor out of range | The clock. Ask `clock_project_PWM` what it actually produced rather than assuming a divider: it retunes the RP2350's own sysclk to whatever divides most cleanly to the target, so the ratio from sysclk to pixel clock is not fixed. Anything derived from the pixel clock has to be derived from the value it returns |
 | Sync but no picture, or garbage | Pmod pinout. Only Tiny VGA is wired up (`uo_out[3]`=vsync, `uo_out[7]`=hsync); the VGA Clock pmod has a different order |
 | Picture but sheared or rolling | VGA timing constants — but these come from `ttihp0p4-vga-clock`, which works, so suspect the clock first |
 
@@ -91,9 +106,43 @@ does not, the problem is in the stream port or the player, not the renderer.
 
 **3. Video.** Only after 2 is stable.
 
-The player is the least proven part — it has never been executed. The DMA register
-plumbing (`PIO0_TXF0`, `treq_sel`) is the first thing to check, then whether the TT
-SDK is still driving GPIO17-24 after PIO claims them.
+## If the picture tears
+
+This is the failure the hardware run actually produced, and it is worth recognising
+on sight because the cause is not where it appears to be.
+
+Each digit row is drawn from a line buffer the host is still filling. The renderer
+re-reads the whole 208 byte row on every one of its 16 scanlines — 832 clocks — while
+the host takes 13312 to fill it, so the host has to be a **full row ahead**. It builds
+that lead during vertical blanking, 819 µs, and anything spent before the first byte
+comes straight off it.
+
+`make -C test delay-sweep` puts numbers on it by delaying the testbench host's first
+byte after vsync, 0 to 1000 µs, and writing a frame for each:
+
+| Delay before first byte | Lead | Result |
+|---|---|---|
+| ≤ 400 µs | ≥ 206 bytes | clean |
+| 500 µs | 157 bytes | tears from column 42 |
+| 600 µs | 108 bytes | tears from column 29 |
+| 800 µs | 9 bytes | tears from column 4 |
+
+So the budget from vsync to the first byte is **about 450 µs**. Two things to check
+against it, in this order:
+
+1. **How long the vsync handler takes**, on a scope from vsync falling to the first
+   strobe. The first version of the player spent 580–600 µs here — over budget, hence
+   the tearing — because it aborted the DMA and reconfigured it through allocating
+   keyword calls. It now does three stores into a preallocated memoryview from a hard
+   IRQ, which should be tens of microseconds.
+2. **Interrupt latency**, if the handler is fast and it still tears. Measured under
+   10 µs on this platform, so it is not expected to be the problem.
+
+The signature, if you want to confirm the diagnosis rather than infer it: the tear
+starts at column ≈ lead/4 + 2.5 and walks right as the row is drawn, so digits show
+one frame in their top half and another in their bottom. The stale content is digit
+row **R−4**, four buffers back — on a still image that reads as a piece of the picture
+from elsewhere, not as a repeat.
 
 # Playing video
 
