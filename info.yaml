@@ -1,14 +1,14 @@
 # Tiny Tapeout project information
 project:
   title:        "Multi Segment Monitor"
-  author:       "Matt Venn"
+  author:       "Matt Venn & Claude"
   discord:      "mattvenn"
   description:  "Simulates a 52x30 array of 7 segment displays on a VGA screen"
   language:     "Verilog"
   clock_hz:     31500000
 
   # How many tiles your design occupies? A single tile is about 167x108 uM.
-  tiles: "4x2"
+  tiles: "3x2"
 
   top_module:  "tt_um_multi_seg_monitor"
 
