@@ -59,6 +59,13 @@ python environment. Deploying to the demoboard still needs the real tool:
 
     python tt_fpga.py --project-dir . configure --upload
 
+or, equivalently:
+
+    make flash TT_TOOLS=/path/to/tt-support-tools PORT=/dev/ttyACM4
+
+`flash` rebuilds the bitstream if needed, then runs `tt_fpga.py configure --upload
+--set-default --clockrate 31500000` against it. `PORT` defaults to `/dev/ttyACM4`.
+
 The frame test captures from the output pins and writes `test/frame.png`, so geometry
 can be iterated without hardware. That loop is what caught the first segment layout
 filling its whole cell — adjacent digits merged into each other and the grid was

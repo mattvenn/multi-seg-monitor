@@ -7,11 +7,13 @@
 #     python tt_fpga.py --project-dir . configure --upload
 #
 TT_TOOLS ?= $(HOME)/asic/tt-support-tools
+PORT     ?= /dev/ttyACM4
 
-TOP      = tt_um_multi_seg_monitor
-FREQ     = 31.5
-PCF      = $(TT_TOOLS)/fpga/tt_fpga_fabricfoxv2.pcf
-WRAPPER  = $(TT_TOOLS)/fpga/tt_fpga_top.v
+TOP        = tt_um_multi_seg_monitor
+FREQ       = 31.5
+CLOCKRATE  = 31500000  # FREQ in Hz, for tt_fpga.py --clockrate
+PCF        = $(TT_TOOLS)/fpga/tt_fpga_fabricfoxv2.pcf
+WRAPPER    = $(TT_TOOLS)/fpga/tt_fpga_top.v
 
 SOURCES  = src/tt_um_multi_seg_monitor.v \
            src/multi_seg_monitor.v \
@@ -23,9 +25,14 @@ SOURCES  = src/tt_um_multi_seg_monitor.v \
 
 BUILD    = build
 
-.PHONY: bitstream test clean
+.PHONY: bitstream flash test clean
 
 bitstream: $(BUILD)/$(TOP).bin
+
+# Needs tt-support-tools' python environment (not oss-cad-suite).
+flash: $(BUILD)/$(TOP).bin
+	$(TT_TOOLS)/tt_fpga.py configure --port $(PORT) --upload --set-default \
+	    --clockrate $(CLOCKRATE)
 
 # The wrapper ties uio_in/uio_out/uio_oe to real bidirectional pins and names the
 # user module, so it has to be generated per project.
