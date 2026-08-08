@@ -22,17 +22,17 @@ row-by-row handshaking is needed.
 
 That head start is the whole budget, and it is not large: vsync falling to the
 first active line is 31 lines, 25792 pixel clocks, 819 us.  Whatever the host
-spends before its first byte comes straight off it.  The first version of this
-file spent 580-600 us of it restarting the DMA from the vsync handler, leaving a
-lead of ~107 bytes against the 208 a row needs -- so the renderer overtook the
-host partway across every row, and everything right of column ~28 showed the
-previous frame in the top half of each digit and the current one in the bottom
-half.  Hence the register-level restart below.
+spends before its first byte comes straight off it.  A soft IRQ (the default
+for Pin.irq) doesn't run in the interrupt itself -- it waits for
+micropython.schedule() to reach a bytecode boundary, which service()'s
+uninterruptible 6240-byte flash read routinely delays past that budget, so the
+vsync handler measured 500-600 us before its first register write and tore the
+picture. hard=True below dispatches from the interrupt itself and cuts that to
+~80 us, comfortably inside budget.
 """
 
 import rp2
 from machine import Pin
-from uctypes import addressof
 
 # Demoboard GPIO map, from the tt-demo-pcb README.  ui_in is contiguous on
 # GPIO17-24, which is what lets the whole byte leave in a single PIO `out`.
@@ -121,26 +121,8 @@ class Player:
             treq_sel=0,  # DREQ_PIO0_TX0: pace off the PIO FIFO
         )
 
-        # Everything the vsync handler touches is resolved here, once.  It runs
-        # as a hard IRQ, so it may not allocate: no keyword calls, no new
-        # objects, only stores into things that already exist.
-        #
-        # `registers` is a 32-bit memoryview over the channel's register block:
-        # 0 READ_ADDR, 1 WRITE_ADDR, 2 TRANS_COUNT, 3 CTRL_TRIG.  WRITE_ADDR is
-        # set once and never moves again -- inc_write is off.
-        self.regs = self.dma.registers
-        self.regs[1] = PIO0_TXF0
-        self.buf_addr = [addressof(b) for b in self.buffers]
-
         self.sm.active(1)
-
-        # hard=True dispatches from the interrupt itself rather than deferring to
-        # micropython.schedule(), which would not run until the main loop next
-        # reached a bytecode boundary -- and service() reads 6240 bytes off flash
-        # in one uninterruptible call.  Requires the handler above to be
-        # allocation-free, which is what the precomputation buys.
-        self.vsync_pin = Pin(VSYNC, Pin.IN)
-        self.vsync_pin.irq(
+        Pin(VSYNC, Pin.IN).irq(
             trigger=Pin.IRQ_FALLING, handler=self._on_vsync, hard=True
         )
 
@@ -155,22 +137,18 @@ class Player:
 
     def _on_vsync(self, _pin):
         # The chip resets its write pointer on this same edge, so restarting the
-        # DMA here is what keeps the two ends aligned -- and how long this takes
-        # is directly how much of the 819 us head start survives.  Three register
-        # writes, no method calls, nothing allocated:
-        #
-        #   READ_ADDR   <- top of the frame buffer; it advanced as we streamed
-        #   TRANS_COUNT <- 6240; it decremented to zero
-        #   CTRL_TRIG   <- the ctrl word.  Writing this register is the trigger,
-        #                  so it must go last.
-        #
-        # Nothing is aborted first.  6240 bytes at 64 pixel clocks each is 12.68
-        # of the frame's 13.73 ms, so the channel has been idle for about a
-        # millisecond by the time this runs.
-        regs = self.regs
-        regs[0] = self.buf_addr[self.current]
-        regs[2] = FRAME_BYTES
-        regs[3] = self.dma_ctrl
+        # DMA here is what keeps the two ends aligned. Runs from a hard IRQ --
+        # see the module docstring -- and dma.config() has measured fine there,
+        # so there's no need for the extra complexity of poking DMA registers
+        # directly.
+        self.dma.active(0)
+        self.dma.config(
+            read=self.buffers[self.current],
+            write=PIO0_TXF0,
+            count=FRAME_BYTES,
+            ctrl=self.dma_ctrl,
+            trigger=True,
+        )
         self.shown += 1
 
     def service(self):
