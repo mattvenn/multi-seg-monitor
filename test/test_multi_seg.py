@@ -168,6 +168,8 @@ async def test_render_frame(dut):
     png.write_png("frame.png", width, height, px)
     dut._log.info("frame ok: %.1f%% of pixels lit, wrote frame.png", frac * 100)
 
+    check_gold(dut, "generator.png", width, height, px)
+
 
 # --------------------------------------------------------------------------
 # Stream port
@@ -280,6 +282,8 @@ async def test_stream_frame(dut):
         "stream ok: %d segments round-tripped, wrote frame_stream.png",
         segments.ROWS * segments.COLS * 8,
     )
+
+    check_gold(dut, "stream.png", width, height, px)
 
 
 # --------------------------------------------------------------------------
@@ -408,6 +412,10 @@ async def run_delay_case(dut, delay_us):
     else:
         dut._log.info("no corruption at this delay")
 
+    # The control is the only case with a right answer to hold it to.
+    if delay_us == 0:
+        check_gold(dut, "delay_0000us.png", width, height, px)
+
 
 def _register_delay_tests():
     """
@@ -441,3 +449,69 @@ def read_ppm(path):
         f"got {len(px)} samples, expected {width * height * 3}"
     )
     return width, height, px
+
+
+# --------------------------------------------------------------------------
+# Gold images
+#
+# The property assertions above say the picture is plausible -- margins clear,
+# corners dark, no blank row, a sane lit fraction.  They do not say it is the
+# same picture as yesterday, and most of what one would want to catch here is a
+# change in appearance rather than a violation of a rule: a segment one pixel
+# wide, a gamma entry off by one, a digit row rendered from the wrong buffer.
+# Comparing against a committed image catches all of those.
+#
+# Only deterministic frames are golden.  The delay sweep's corrupted captures
+# are observations of a fault, not a specification of one, so pinning them would
+# turn any future change in the arbitration into a failure that has to be
+# rubber-stamped.  Its 0 us control is golden, because that one is supposed to be
+# pixel exact and it is what makes the rest of the sweep trustworthy.
+# --------------------------------------------------------------------------
+GOLD_DIR = os.path.join(os.path.dirname(__file__), "gold")
+
+
+def check_gold(dut, name, width, height, px):
+    """
+    Compare a captured frame against test/gold/<name>.
+
+    Regenerate with `make -C test gold` after an intended change, and look at
+    the result before committing it -- an image test is only worth as much as
+    the eye that last approved it.
+    """
+    path = os.path.join(GOLD_DIR, name)
+
+    if os.environ.get("GOLD_UPDATE"):
+        os.makedirs(GOLD_DIR, exist_ok=True)
+        png.write_png(path, width, height, px)
+        dut._log.warning("GOLD_UPDATE set: rewrote %s -- check it by eye", path)
+        return
+
+    if not os.path.exists(path):
+        raise AssertionError(
+            f"{path} is missing -- create it with `make -C test gold` and check it"
+        )
+
+    gw, gh, gold = png.read_png(path)
+    assert (gw, gh) == (width, height), (
+        f"{name} is {gw}x{gh}, captured frame is {width}x{height}"
+    )
+
+    if px == gold:
+        dut._log.info("matches gold/%s exactly", name)
+        return
+
+    bad = [i // 3 for i in range(0, len(px), 3) if px[i : i + 3] != gold[i : i + 3]]
+
+    # Differences on their own are hard to find in a 640x480 field of digits, so
+    # write a map: everything dimmed, the disagreeing pixels in red.
+    out = [v // 4 for v in px]
+    for p in bad:
+        out[p * 3 : p * 3 + 3] = [255, 0, 0]
+    diff_name = name.replace(".png", "_diff.png")
+    png.write_png(diff_name, width, height, out)
+
+    first = ", ".join(f"({p % width},{p // width})" for p in bad[:5])
+    raise AssertionError(
+        f"{len(bad)} of {width * height} pixels differ from gold/{name} "
+        f"(first at {first}) -- see {diff_name}"
+    )

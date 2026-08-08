@@ -69,13 +69,28 @@ include $(shell cocotb-config --makefiles)/Makefile.sim
 # Writes frame_delay_0100us.png .. frame_delay_1000us.png.  results.xml is
 # removed first because it is what Makefile.sim uses to decide the run is already
 # up to date, and nothing here changes the sources it depends on.
+# The filter values carry their own double quotes because Makefile.sim pastes
+# COCOTB_TEST_FILTER into the recipe unquoted, so a regex containing | would
+# otherwise be read by the shell as a pipeline.
 delay-sweep: testcard.seg
 	rm -f results.xml
-	DELAY_SWEEP=1 COCOTB_TEST_FILTER='test_stream_delay_.*' $(MAKE)
+	DELAY_SWEEP=1 COCOTB_TEST_FILTER='"test_stream_delay_.*"' $(MAKE)
 
+# Rewrite the gold images after an intended change to the picture.  Only the
+# three deterministic captures have gold; look at what this produces before
+# committing it, because nothing else will.
+gold: testcard.seg
+	rm -f results.xml
+	GOLD_UPDATE=1 DELAY_SWEEP=1 \
+	    COCOTB_TEST_FILTER='"test_render_frame|test_stream_frame|test_stream_delay_0000us"' \
+	    $(MAKE)
+
+# testcard.seg is committed, so this only fires if it has been deleted.  The
+# sweep must not depend on the local ffmpeg: a different build rounding one
+# pixel differently would break the gold comparison for no real reason.
 testcard.seg:
 	../tools/testcard.sh
 
 clean::
 	rm -rf frame.ppm frame.png sim_build results.xml tb.vcd
-	rm -f frame_delay_*.png testcard.png testcard.seg
+	rm -f frame_delay_*.png *_diff.png testcard.png
