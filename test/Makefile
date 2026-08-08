@@ -60,5 +60,22 @@ COCOTB_TEST_MODULES = test_multi_seg
 
 include $(shell cocotb-config --makefiles)/Makefile.sim
 
+# Vsync-to-first-byte delay sweep.  Ten full frame captures, so it is kept out of
+# the default run -- about ten minutes against the suite's two and a half, and CI
+# runs the suite twice (inferred array and IHP macro).
+#
+#     make delay-sweep
+#
+# Writes frame_delay_0100us.png .. frame_delay_1000us.png.  results.xml is
+# removed first because it is what Makefile.sim uses to decide the run is already
+# up to date, and nothing here changes the sources it depends on.
+delay-sweep: testcard.seg
+	rm -f results.xml
+	DELAY_SWEEP=1 COCOTB_TEST_FILTER='test_stream_delay_.*' $(MAKE)
+
+testcard.seg:
+	../tools/testcard.sh
+
 clean::
 	rm -rf frame.ppm frame.png sim_build results.xml tb.vcd
+	rm -f frame_delay_*.png testcard.png testcard.seg

@@ -10,7 +10,7 @@ import sys
 
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import ClockCycles, FallingEdge, RisingEdge
+from cocotb.triggers import ClockCycles, FallingEdge, RisingEdge, Timer
 from cocotb.utils import get_sim_time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
@@ -197,7 +197,7 @@ async def push_byte(dut, value):
     await ClockCycles(dut.clk, BYTE_PERIOD - 6)
 
 
-async def host_stream(dut, frame, frames):
+async def host_stream(dut, frame, frames, delay_us=0):
     """
     Emulates the RP2350 pacing described in SPEC.md section 4.3.
 
@@ -206,11 +206,19 @@ async def host_stream(dut, frame, frames):
     and the raster advance together, so the host stays between one and three rows
     ahead for the whole frame without ever looking at hsync.
 
+    `delay_us` models the real host's latency between seeing vsync and its first
+    byte leaving -- on the demoboard, the vsync interrupt handler restarting the
+    DMA. It is spent once per frame and comes straight off the head start; the
+    byte rate afterwards is unchanged, because the DMA is paced by the PIO and
+    does not speed up to catch up.
+
     Bounded rather than free-running: a coroutine still parked on a trigger when
     cocotb tears the simulation down segfaults Icarus.
     """
     for _ in range(frames):
         await FallingEdge(dut.vs)
+        if delay_us:
+            await Timer(delay_us, unit="us")
         for byte in frame:
             await push_byte(dut, byte)
 
@@ -272,6 +280,155 @@ async def test_stream_frame(dut):
         "stream ok: %d segments round-tripped, wrote frame_stream.png",
         segments.ROWS * segments.COLS * 8,
     )
+
+
+# --------------------------------------------------------------------------
+# Vsync-to-first-byte delay sweep
+#
+# Reproduces, in simulation, the tearing seen when streaming to the FPGA
+# breakout.  The host's vsync handler took 580-600 us to restart the DMA against
+# only 819 us of vertical blanking, so the head start it is supposed to build up
+# was nearly gone before the first byte moved (commit ce2388c).
+#
+# What that does to the picture: the renderer re-fetches the whole 208 byte row
+# on every one of its 16 scanlines, sweeping it in 832 clocks, while the host
+# fills that same row over 13312.  Once the lead is smaller than a row the
+# renderer overtakes the host partway across, so the left of each digit row is
+# the byte the host just wrote and the right is whatever was in that buffer
+# before -- which, four buffers deep, is digit row R-4 of the previous frame.
+# A still image tears just as visibly as a moving one for that reason: the stale
+# bytes are not the same row again, they are a row from elsewhere in the picture.
+#
+# Off by default -- set DELAY_SWEEP.  Each case captures a full frame, so the ten
+# of them cost roughly ten minutes.
+# --------------------------------------------------------------------------
+
+# Vsync falling to the first active line: 3 sync + 28 back porch lines.  This is
+# the entire head start, and the delay comes straight off it.
+V_LEAD_CLOCKS = (V_SYNC + V_BP) * H_TOTAL  # 25792, 819 us at 31.5 MHz
+
+# A frame's 6240 bytes at 64 clocks each is 399360 of the 432640 clocks in a
+# frame, so beyond ~1056 us of delay the push no longer fits between two vsyncs
+# and the tail is cut off by the pointer reset instead -- a different failure.
+# The sweep stops at 1000 us, just inside that.
+#
+# 0 is the control: the same card, the same path, no delay.  Without it there is
+# no way to tell tearing from the card simply being hard to read as digits.
+DELAYS_US = [0] + list(range(100, 1001, 100))
+
+TESTCARD = os.path.join(os.path.dirname(__file__), "testcard.seg")
+
+
+def load_testcard():
+    """Frame 0 of the test card -- see tools/testcard.sh."""
+    try:
+        with open(TESTCARD, "rb") as f:
+            frame = f.read(segments.FRAME_BYTES)
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            f"{TESTCARD} is missing -- run tools/testcard.sh to generate it"
+        ) from None
+    assert len(frame) == segments.FRAME_BYTES, (
+        f"{TESTCARD} holds {len(frame)} bytes, expected {segments.FRAME_BYTES}"
+    )
+    return frame
+
+
+def analyse(px, width, frame):
+    """
+    Compare every segment against what was streamed.
+
+    Returns (wrong, stale, first_bad) where `stale` counts the wrong segments
+    whose value is what digit row R-4 holds -- the signature of the renderer
+    reading a buffer the host has not refilled yet -- and `first_bad` maps each
+    digit row to the leftmost column that disagrees, which is where the renderer
+    caught up with the host on that row.
+    """
+
+    def want(col, row, seg):
+        off = segments.digit_offset(col, row)
+        # The design emits grey = level[5:2], so the 6 bit gamma entry loses its
+        # bottom two bits on the way to the pmod.
+        return segments.GAMMA[segments.unpack_digit(frame[off : off + 4])[seg]] >> 2
+
+    wrong = stale = 0
+    first_bad = {}
+    for row in range(segments.ROWS):
+        for col in range(segments.COLS):
+            for seg in range(8):
+                x, y = segments.segment_centre(col, row, seg)
+                got = px[(y * width + x) * 3] // 17
+                if got == want(col, row, seg):
+                    continue
+                wrong += 1
+                if row >= 4 and got == want(col, row - 4, seg):
+                    stale += 1
+                if row not in first_bad:
+                    first_bad[row] = col
+    return wrong, stale, first_bad
+
+
+async def run_delay_case(dut, delay_us):
+    cocotb.start_soon(Clock(dut.clk, CLK_PS, unit="ps").start())
+    await reset(dut)
+    dut.uio_in.value = UIO_IDLE
+
+    frame = load_testcard()
+    cocotb.start_soon(host_stream(dut, frame, frames=7, delay_us=delay_us))
+
+    # Let the host get into step, then capture.
+    await ClockCycles(dut.clk, 2 * H_TOTAL * V_TOTAL)
+    dut.dump_en.value = 1
+    await ClockCycles(dut.clk, 3 * H_TOTAL * V_TOTAL)
+
+    width, height, px = read_ppm("frame.ppm")
+    wrong, stale, first_bad = analyse(px, width, frame)
+
+    name = f"frame_delay_{delay_us:04d}us.png"
+    png.write_png(name, width, height, px)
+
+    lead = (V_LEAD_CLOCKS - delay_us * 31.5) / BYTE_PERIOD
+    total = segments.ROWS * segments.COLS * 8
+    dut._log.info(
+        "delay %d us: lead %.0f bytes (%.2f rows), %d/%d segments wrong, "
+        "%d of them stale from row-4, wrote %s",
+        delay_us,
+        lead,
+        lead / segments.ROW_BYTES,
+        wrong,
+        total,
+        stale,
+        name,
+    )
+    if first_bad:
+        dut._log.info(
+            "first bad column by digit row: %s",
+            ", ".join(f"{r}:{c}" for r, c in sorted(first_bad.items())),
+        )
+    else:
+        dut._log.info("no corruption at this delay")
+
+
+def _register_delay_tests():
+    """
+    One test per delay, built in a loop.
+
+    Separate tests rather than one test looping, so each writes its own PNG and
+    a failure in one still leaves the others' images on disk.
+    """
+    for delay_us in DELAYS_US:
+        name = f"test_stream_delay_{delay_us:04d}us"
+
+        @cocotb.test(name=name)
+        async def _test(dut, delay_us=delay_us):
+            await run_delay_case(dut, delay_us)
+
+        _test.__doc__ = f"Stream with {delay_us} us between vsync and the first byte."
+        globals()[name] = _test
+
+
+if os.environ.get("DELAY_SWEEP"):
+    _register_delay_tests()
 
 
 def read_ppm(path):

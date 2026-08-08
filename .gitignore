@@ -7,6 +7,10 @@ test/frame.png
 *.vcd
 __pycache__/
 test/frame_stream.png
+test/frame_delay_*.png
+test/testcard.png
+test/testcard.seg
+test/testcard_ref.png
 *.seg
 videos/
 
