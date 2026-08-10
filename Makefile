@@ -56,6 +56,7 @@ $(BUILD)/$(TOP).bin: $(BUILD)/$(TOP).asc
 test:
 	$(MAKE) -C test
 	cd tools && python3 test_video2seg.py
+	cd tools && python3 test_segments.py
 
 clean:
 	rm -rf $(BUILD) src/_tt_fpga_top.v

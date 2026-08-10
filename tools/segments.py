@@ -32,8 +32,13 @@ SEGMENTS = [
     ("DP", 10, 10, 12, 13),
 ]
 
-# round((i/15) ** (1/2.2) * 63) -- must match src/gamma.v
-GAMMA = [0, 18, 25, 30, 35, 38, 42, 45, 47, 50, 52, 55, 57, 59, 61, 63]
+# Only the top 4 bits (level[5:2] in tt_um_multi_seg_monitor.v) ever reach the
+# panel, so each entry is round((i/15) ** (1/2.2) * 15) scaled back up by 4 --
+# not round((i/15) ** (1/2.2) * 63) independently rounded at 6-bit precision and
+# then truncated, which double-rounds and silently loses extra levels on top of
+# the ones the gamma curve's own compression at the bright end already costs.
+# Must match src/gamma.v.
+GAMMA = [0, 16, 24, 28, 32, 36, 40, 44, 44, 48, 48, 52, 56, 56, 60, 60]
 
 
 def pack_digit(intensities):
