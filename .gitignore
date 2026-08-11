@@ -26,3 +26,4 @@ tt_submission
 src/user_config.json
 src/config_merged.json
 test/gate_level_netlist.v
+.superpowers/
