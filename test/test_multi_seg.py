@@ -17,18 +17,20 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
 import png  # noqa: E402
 import segments  # noqa: E402
 
-# 640x480 @ 72Hz, 31.5 MHz pixel clock -- SPEC.md section 6
-CLK_PS = 31746  # 1 / 31.5 MHz
+# 800x600 @ 60Hz, 40 MHz pixel clock --
+# docs/superpowers/specs/2026-08-11-800x600-mode-design.md
+CLK_PS = 25000  # 1 / 40 MHz
 
-H_ACTIVE, H_FP, H_SYNC, H_BP = 640, 24, 40, 128
-V_ACTIVE, V_FP, V_SYNC, V_BP = 480, 9, 3, 28
-H_TOTAL = H_ACTIVE + H_FP + H_SYNC + H_BP  # 832
-V_TOTAL = V_ACTIVE + V_FP + V_SYNC + V_BP  # 520
+H_ACTIVE, H_FP, H_SYNC, H_BP = 800, 40, 128, 88
+V_ACTIVE, V_FP, V_SYNC, V_BP = 600, 1, 4, 23
+H_TOTAL = H_ACTIVE + H_FP + H_SYNC + H_BP  # 1056
+V_TOTAL = V_ACTIVE + V_FP + V_SYNC + V_BP  # 628
 
-# Grid geometry -- SPEC.md section 1
-COLS, ROWS = 52, 30
+# Grid geometry -- docs/superpowers/specs/2026-08-11-800x600-mode-design.md
+COLS, ROWS = 64, 37
 CELL_W, CELL_H = 12, 16
-MARGIN_X = 8
+MARGIN_X = 16
+MARGIN_Y = 4
 
 # On PmodVGA every uo_out bit carries colour -- R in the low nibble, B in the
 # high one -- and green sits on uio_out[3:0].  The old Tiny VGA mask here left
@@ -63,7 +65,7 @@ async def low_cycles(sig):
 
 @cocotb.test()
 async def test_vga_timing(dut):
-    """hsync and vsync match the 640x480@72 constants."""
+    """hsync and vsync match the 800x600@60 constants."""
     cocotb.start_soon(Clock(dut.clk, CLK_PS, unit="ps").start())
     await reset(dut)
 
@@ -126,9 +128,10 @@ async def test_render_frame(dut):
     def lit(x, y):
         return px[(y * width + x) * 3] != 0
 
-    # Margins: 52 columns of 12 pixels leaves 8 blank either side.  Reporting the
-    # first and last lit column rather than the first offending pixel makes a
-    # misaligned capture obvious at a glance.
+    # Margins: 64 columns of 12 pixels leaves 16 blank either side, 37 rows of 16
+    # leaves 4 blank top and bottom.  Reporting the first/last lit row or column
+    # rather than the first offending pixel makes a misaligned capture obvious at
+    # a glance.
     cols_lit = [x for x in range(width) if any(lit(x, y) for y in range(0, height, 3))]
     assert cols_lit, "nothing rendered at all"
     assert cols_lit[0] >= MARGIN_X, (
@@ -138,24 +141,33 @@ async def test_render_frame(dut):
         f"content ends at x={cols_lit[-1]}, expected < {MARGIN_X + COLS * CELL_W}"
     )
 
+    rows_lit = [y for y in range(height) if any(lit(x, y) for x in range(0, width, 3))]
+    assert rows_lit, "nothing rendered at all"
+    assert rows_lit[0] >= MARGIN_Y, (
+        f"content starts at y={rows_lit[0]}, top margin should be {MARGIN_Y} wide"
+    )
+    assert rows_lit[-1] < MARGIN_Y + ROWS * CELL_H, (
+        f"content ends at y={rows_lit[-1]}, expected < {MARGIN_Y + ROWS * CELL_H}"
+    )
+
     # Cell corners are where an x zone and a y zone both miss, so nothing selects
     # a segment and they must stay dark.
     for row in range(0, ROWS, 3):
         for col in range(0, COLS, 5):
             x0 = MARGIN_X + col * CELL_W
-            y0 = row * CELL_H
+            y0 = MARGIN_Y + row * CELL_H
             for dx, dy in ((0, 0), (1, 1), (0, 15), (1, 14)):
                 assert not lit(x0 + dx, y0 + dy), (
                     f"corner lit in cell ({col}, {row}) at offset ({dx}, {dy})"
                 )
 
     # Every digit row carries data: row 0 is built during vertical blanking and
-    # rows 1..29 during the row before, so a blank row means the generator or the
+    # rows 1..36 during the row before, so a blank row means the generator or the
     # buffer swap is out of step.
     for row in range(ROWS):
         band = sum(
             1
-            for y in range(row * CELL_H, (row + 1) * CELL_H)
+            for y in range(MARGIN_Y + row * CELL_H, MARGIN_Y + (row + 1) * CELL_H)
             for x in range(MARGIN_X, MARGIN_X + COLS * CELL_W, 3)
             if lit(x, y)
         )
@@ -184,7 +196,7 @@ UIO_STB = 1 << 6
 UIO_IDLE = UIO_MODE
 UIO_STROBE = UIO_MODE | UIO_STB
 
-# One digit row is 16 scanlines and 208 bytes, so a byte every 64 pixel clocks
+# One digit row is 16 scanlines and 256 bytes, so a byte every 66 pixel clocks
 # tracks the raster exactly.  The division is exact, which is what lets the host
 # free-run instead of resynchronising every row.
 BYTE_PERIOD = CELL_H * H_TOTAL // segments.ROW_BYTES
@@ -290,13 +302,16 @@ async def test_stream_frame(dut):
 # Vsync-to-first-byte delay sweep
 #
 # Reproduces, in simulation, the tearing seen when streaming to the FPGA
-# breakout.  The host's vsync handler took 580-600 us to restart the DMA against
-# only 819 us of vertical blanking, so the head start it is supposed to build up
-# was nearly gone before the first byte moved (commit ce2388c).
+# breakout at 640x480.  There the host's vsync handler took 580-600 us to
+# restart the DMA against only 819 us of vertical blanking, so the head start
+# it is supposed to build up was nearly gone before the first byte moved
+# (commit ce2388c). 800x600's head start is tighter still (713 us, see below),
+# which is exactly why this sweep is worth re-running at the new timing rather
+# than assumed safe by analogy.
 #
-# What that does to the picture: the renderer re-fetches the whole 208 byte row
-# on every one of its 16 scanlines, sweeping it in 832 clocks, while the host
-# fills that same row over 13312.  Once the lead is smaller than a row the
+# What that does to the picture: the renderer re-fetches the whole 256 byte row
+# on every one of its 16 scanlines, sweeping it in 1056 clocks, while the host
+# fills that same row over 16896.  Once the lead is smaller than a row the
 # renderer overtakes the host partway across, so the left of each digit row is
 # the byte the host just wrote and the right is whatever was in that buffer
 # before -- which, four buffers deep, is digit row R-4 of the previous frame.
@@ -307,18 +322,18 @@ async def test_stream_frame(dut):
 # of them cost roughly ten minutes.
 # --------------------------------------------------------------------------
 
-# Vsync falling to the first active line: 3 sync + 28 back porch lines.  This is
+# Vsync falling to the first active line: 4 sync + 23 back porch lines.  This is
 # the entire head start, and the delay comes straight off it.
-V_LEAD_CLOCKS = (V_SYNC + V_BP) * H_TOTAL  # 25792, 819 us at 31.5 MHz
+V_LEAD_CLOCKS = (V_SYNC + V_BP) * H_TOTAL  # 28512, 713 us at 40 MHz
 
-# A frame's 6240 bytes at 64 clocks each is 399360 of the 432640 clocks in a
-# frame, so beyond ~1056 us of delay the push no longer fits between two vsyncs
+# A frame's 9472 bytes at 66 clocks each is 625152 of the 663168 clocks in a
+# frame, so beyond ~950 us of delay the push no longer fits between two vsyncs
 # and the tail is cut off by the pointer reset instead -- a different failure.
-# The sweep stops at 1000 us, just inside that.
+# The sweep stops at 900 us, just inside that.
 #
 # 0 is the control: the same card, the same path, no delay.  Without it there is
 # no way to tell tearing from the card simply being hard to read as digits.
-DELAYS_US = [0] + list(range(100, 1001, 100))
+DELAYS_US = [0] + list(range(100, 901, 100))
 
 TESTCARD = os.path.join(os.path.dirname(__file__), "testcard.seg")
 
@@ -391,7 +406,7 @@ async def run_delay_case(dut, delay_us):
     name = f"frame_delay_{delay_us:04d}us.png"
     png.write_png(name, width, height, px)
 
-    lead = (V_LEAD_CLOCKS - delay_us * 31.5) / BYTE_PERIOD
+    lead = (V_LEAD_CLOCKS - delay_us * 40) / BYTE_PERIOD
     total = segments.ROWS * segments.COLS * 8
     dut._log.info(
         "delay %d us: lead %.0f bytes (%.2f rows), %d/%d segments wrong, "
@@ -502,7 +517,7 @@ def check_gold(dut, name, width, height, px):
 
     bad = [i // 3 for i in range(0, len(px), 3) if px[i : i + 3] != gold[i : i + 3]]
 
-    # Differences on their own are hard to find in a 640x480 field of digits, so
+    # Differences on their own are hard to find in an 800x600 field of digits, so
     # write a map: everything dimmed, the disagreeing pixels in red.
     out = [v // 4 for v in px]
     for p in bad:

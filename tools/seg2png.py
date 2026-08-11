@@ -18,7 +18,7 @@ import argparse
 import png
 import segments
 
-WIDTH, HEIGHT = 640, 480
+WIDTH, HEIGHT = 800, 600
 
 
 def render(frame, levels):

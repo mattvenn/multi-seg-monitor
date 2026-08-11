@@ -5,30 +5,31 @@ Streams a .seg file (produced by tools/video2seg.py) to the Multi Segment
 Monitor over the byte-wide push port.
 
 The chip has no framebuffer, so every displayed frame has to be pushed in full,
-72.8 times a second, whatever the video's own frame rate is.  That is 454 kB/s,
+60.3 times a second, whatever the video's own frame rate is.  That is 571 kB/s,
 which is why the transfer is PIO plus DMA rather than anything touching Python
 per byte.
 
 Pacing is the interesting part and it comes out almost free.  One digit row is
-16 scanlines and 208 bytes, so a byte every 64 pixel clocks tracks the raster
+16 scanlines and 256 bytes, so a byte every 66 pixel clocks tracks the raster
 exactly -- the division is exact, no remainder to accumulate.  Vertical blanking
-gives the host a head start of about two rows, and from there the byte rate and
-the raster advance in step.  The chip's write pointer resets on vsync and so
-does the DMA, so the two cannot drift apart by more than a frame.
+gives the host a head start of a bit under two rows, and from there the byte
+rate and the raster advance in step.  The chip's write pointer resets on vsync
+and so does the DMA, so the two cannot drift apart by more than a frame.
 
 That is why the line buffer holds four rows rather than two: at a lead of ~2
 rows the host is always writing a buffer the renderer is not reading, and no
 row-by-row handshaking is needed.
 
 That head start is the whole budget, and it is not large: vsync falling to the
-first active line is 31 lines, 25792 pixel clocks, 819 us.  Whatever the host
-spends before its first byte comes straight off it.  A soft IRQ (the default
-for Pin.irq) doesn't run in the interrupt itself -- it waits for
-micropython.schedule() to reach a bytecode boundary, which service()'s
-uninterruptible 6240-byte flash read routinely delays past that budget, so the
-vsync handler measured 500-600 us before its first register write and tore the
-picture. hard=True below dispatches from the interrupt itself and cuts that to
-~80 us, comfortably inside budget.
+first active line is 27 lines, 28512 pixel clocks, 713 us (800x600@60, was 819
+us at 640x480@72).  Whatever the host spends before its first byte comes
+straight off it.  A soft IRQ (the default for Pin.irq) doesn't run in the
+interrupt itself -- it waits for micropython.schedule() to reach a bytecode
+boundary, which service()'s uninterruptible flash read routinely delays past
+that budget, so the vsync handler measured 500-600 us before its first
+register write and tore the picture at the old, tighter clock. hard=True below
+dispatches from the interrupt itself and cuts that to ~80 us, comfortably
+inside budget.
 """
 
 import rp2
@@ -46,15 +47,16 @@ STROBE = 31  # uio[6]       -> stream strobe
 MODE = 32  # uio[7]       -> 1 selects streamed data
 VSYNC = 30  # uio[5]       -> PmodVGA vsync
 
-# Display constants -- must match SPEC.md sections 1 and 6
-COLS, ROWS = 52, 30
+# Display constants -- must match
+# docs/superpowers/specs/2026-08-11-800x600-mode-design.md
+COLS, ROWS = 64, 37
 CELL_H = 16
-H_TOTAL = 832
-ROW_BYTES = COLS * 4  # 208
-FRAME_BYTES = ROWS * ROW_BYTES  # 6240
+H_TOTAL = 1056
+ROW_BYTES = COLS * 4  # 256
+FRAME_BYTES = ROWS * ROW_BYTES  # 9472
 
-CLOCKS_PER_BYTE = CELL_H * H_TOTAL // ROW_BYTES  # 64, exactly
-PIXEL_HZ = 31_500_000  # SPEC.md section 6: required VGA pixel clock
+CLOCKS_PER_BYTE = CELL_H * H_TOTAL // ROW_BYTES  # 66, exactly
+PIXEL_HZ = 40_000_000  # required VGA pixel clock, 800x600@60
 
 PIO0_TXF0 = 0x50200010  # PIO0 TX FIFO 0
 
@@ -85,7 +87,7 @@ class Player:
         self.file.seek(0)
 
         # Two buffers: the DMA replays one while the next video frame is read
-        # into the other.  A frame is 6240 bytes, so this costs 12 kB of the
+        # into the other.  A frame is 9472 bytes, so this costs ~19 kB of the
         # RP2350's 520 kB.
         self.buffers = [bytearray(FRAME_BYTES), bytearray(FRAME_BYTES)]
         self.current = 0
@@ -93,7 +95,7 @@ class Player:
         self._read_into(self.buffers[0])
 
         # How many display frames each video frame is held for.
-        self.repeat = max(1, round(72.8 / video_fps))
+        self.repeat = max(1, round(60.3 / video_fps))
         self.shown = 0
 
         Pin(MODE, Pin.OUT, value=1)

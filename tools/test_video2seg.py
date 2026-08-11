@@ -39,9 +39,12 @@ def test_segment_isolation():
     for target in range(8):
         linear = np.zeros((segments.GRID_H, segments.GRID_W))
         x0, x1, y0, y1 = segments.segment_pixels(0, 0, target)
-        # segment_pixels includes the left margin; the converter works on the
-        # grid alone, so take it back off.
-        linear[y0 : y1 + 1, x0 - segments.MARGIN_X : x1 - segments.MARGIN_X + 1] = 1.0
+        # segment_pixels includes the left/top margin; the converter works on
+        # the grid alone, so take it back off.
+        linear[
+            y0 - segments.MARGIN_Y : y1 - segments.MARGIN_Y + 1,
+            x0 - segments.MARGIN_X : x1 - segments.MARGIN_X + 1,
+        ] = 1.0
 
         got = video2seg.frame_to_segments(linear)
         for seg in range(8):

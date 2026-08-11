@@ -268,3 +268,58 @@ their "proven on ttihp0p4 silicon" provenance), `CELL_*`/`COLS`/`ROWS`/`ROW_BYTE
 in `multi_seg_monitor.v`, the pacing constant in `firmware/seg_player.py`, the
 segment table in `tools/segments.py`, `tb.v`, and all three gold images. Rebuild
 gold with `make -C test gold` and **look at what it produces before committing.**
+
+## 11. 800x600 mode: implemented and confirmed on hardware (2026-08-11)
+
+The §4 candidate is built, FPGA-only, on branch `800x600-mode` — full design in
+`docs/superpowers/specs/2026-08-11-800x600-mode-design.md`. Notes here are what
+that process turned up that changes or sharpens the above.
+
+**Digit geometry: kept, not redesigned.** The question that opened this whole
+document was making digits bigger so mitred ends have somewhere to show. Two
+16x20 redesigns were mocked up at real pixel scale and compared against today's
+digit side by side (a scaled-up 2px pen, and a bolder ~3px pen) — neither read
+better by eye than the current 12x16 digit. So this mode is **more digits, not
+bigger ones**: 2368 (64x37) against today's 1560, geometry byte-for-byte
+unchanged. The mitring question §5 raised is still open and still wants its own
+native-resolution-scaling fix independent of any resolution change.
+
+**The Fmax question resolved empirically, in the FPGA's favour.** nextpnr's
+post-route signoff on the unmodified 640x480 logic was 39.58 MHz against a 40.00
+MHz target — a ~1% miss, essentially the same number §2.2 recorded (39.14 MHz).
+Built anyway and flashed: the internal generator runs clean on the actual UP5K
+at 40 MHz. nextpnr-ice40's timing closure was the conservative one here, not the
+silicon — worth remembering before spending effort working around a *reported*
+ceiling next time.
+
+**A real RTL subtlety `CELL_H` being a power of two used to hide.** `cy`/`row`
+were a plain bit-slice of `y_px` (`y_px[3:0]`, `y_px[8:4]`) — free, but only
+correct because the old mode's vertical margin was exactly zero (30*16=480).
+800x600 has a genuine, unavoidable 4px vertical margin (37*16=592 of 600, since
+600 doesn't divide by 16), and slicing raw `y_px` under a nonzero margin puts
+row 0 mid-cell. Fixed by offsetting first (`y_rel = y_px - MARGIN_Y`) and
+slicing that — no clocked counter needed, since `CELL_H` is still a power of
+two, but the *offset* is no longer optional the way it was at 640x480. Any
+future mode where `ROWS * CELL_H != V_ACTIVE` needs this same offset; one where
+`CELL_H` itself isn't a power of two would need the full counter `cx`/`col`
+already uses.
+
+**The vsync-to-first-byte margin got tighter, even though the tearing threshold
+didn't move.** `make -C test delay-sweep` at the new timing: clean through 400 us
+of delay, tearing from 500 us -- the same absolute threshold the 640x480 mode
+had. But the *budget* shrank with it, from 819 us to 713 us, so the margin above
+that threshold is what actually got smaller (roughly 319 us of slack before,
+213-313 us now, depending which side of 500 us you compare against). The
+`hard=True` vsync dispatch fix (~80 us, README "If the picture tears") stays
+comfortably inside either budget, so nothing needs to change today -- but a
+future regression back toward soft-IRQ dispatch latency (500-600 us, the
+original failure) would have noticeably less room to hide in before tearing at
+this resolution than it did at 640x480.
+
+**Practical fallout for video, not just RTL.** Frame size grew with `ROW_BYTES`
+(208 to 256 bytes/row), so a frame is 9472 bytes against 6240 before, +52%. Flash
+budget on the demoboard didn't grow to match, so the same clip fits proportionally
+less duration at a given fps than it used to — worth remembering when reusing old
+`--fps` values from before this change. Existing `.seg` files predate the frame
+size change and are silently the wrong shape now, not just a different picture:
+they need regenerating from source, not copying over.

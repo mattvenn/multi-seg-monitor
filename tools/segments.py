@@ -6,16 +6,17 @@ side. They mirror `src/multi_seg_monitor.v` and SPEC.md section 1.1 -- if the RT
 layout changes, change it here too or the round-trip test will say so.
 """
 
-# Grid -- SPEC.md section 1
-COLS, ROWS = 52, 30
+# Grid -- 800x600 mode, docs/superpowers/specs/2026-08-11-800x600-mode-design.md
+COLS, ROWS = 64, 37
 CELL_W, CELL_H = 12, 16
-MARGIN_X = 8
-GRID_W = COLS * CELL_W  # 624
-GRID_H = ROWS * CELL_H  # 480
+MARGIN_X = 16  # (800 - COLS*CELL_W) / 2
+MARGIN_Y = 4  # (600 - ROWS*CELL_H) / 2 -- 600 doesn't divide evenly by CELL_H
+GRID_W = COLS * CELL_W  # 768
+GRID_H = ROWS * CELL_H  # 592
 
 BYTES_PER_DIGIT = 4
-ROW_BYTES = COLS * BYTES_PER_DIGIT  # 208
-FRAME_BYTES = ROWS * ROW_BYTES  # 6240
+ROW_BYTES = COLS * BYTES_PER_DIGIT  # 256 -- the line buffer's wall
+FRAME_BYTES = ROWS * ROW_BYTES  # 9472
 
 # Segment rectangles within a cell, as (name, x0, x1, y0, y1) inclusive.
 # Index order is the nibble order of a digit word: a, b, c, d, e, f, g, DP.
@@ -68,7 +69,7 @@ def segment_pixels(col, row, seg_index):
     """Screen pixel rectangle covered by one segment, as (x0, x1, y0, y1)."""
     _, sx0, sx1, sy0, sy1 = SEGMENTS[seg_index]
     x = MARGIN_X + col * CELL_W
-    y = row * CELL_H
+    y = MARGIN_Y + row * CELL_H
     return x + sx0, x + sx1, y + sy0, y + sy1
 
 

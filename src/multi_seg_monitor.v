@@ -2,7 +2,7 @@
 //
 // Multi Segment Monitor -- core
 //
-// Renders a 52 x 30 grid of 7 segment digits by racing the beam.  There is no
+// Renders a 64 x 37 grid of 7 segment digits by racing the beam.  There is no
 // framebuffer: only the digit row currently being drawn is resident, held in a
 // double buffered line buffer while the source fills the other half (SPEC.md
 // section 3).
@@ -11,7 +11,7 @@
 // produces a picture with no external data at all.
 //
 module multi_seg_monitor (
-    input  wire       clk,          // 31.5 MHz pixel clock
+    input  wire       clk,          // 40 MHz pixel clock
     input  wire       rst_n,
     input  wire [7:0] stream_data,  // ui_in
     input  wire       stream_stb,   // uio[0], asynchronous
@@ -24,13 +24,19 @@ module multi_seg_monitor (
     // Grid geometry, fixed at synthesis (SPEC.md section 1).
     localparam CELL_W    = 12;
     localparam CELL_H    = 16;
-    localparam COLS      = 52;
-    localparam ROWS      = 30;
-    localparam MARGIN_X  = 8;               // (640 - COLS*CELL_W) / 2
-    localparam ROW_BYTES = COLS * 4;        // 208 bytes per digit row
+    localparam COLS      = 64;
+    localparam ROWS      = 37;
+    localparam MARGIN_X  = 16;              // (800 - COLS*CELL_W) / 2
+    localparam MARGIN_Y  = 4;               // (600 - ROWS*CELL_H) / 2
+    localparam ROW_BYTES = COLS * 4;        // 256 bytes per digit row -- the
+                                             // line buffer's wall (SPEC.md
+                                             // section 3): fetch_col below is
+                                             // a 6 bit field, so 64 is the most
+                                             // this design can ever address.
 
-    wire [9:0] x_px, y_px;
-    wire       vga_hsync, vga_vsync;
+    wire [10:0] x_px;
+    wire [9:0]  y_px;
+    wire        vga_hsync, vga_vsync;
 
     VgaSyncGen sync_gen (
         .px_clk      (clk),
@@ -45,15 +51,18 @@ module multi_seg_monitor (
     // x_px and y_px are registered inside VgaSyncGen and underflow to large
     // values during blanking, so range checks on them serve as active video flags
     // while staying in the same pipeline stage as the coordinates themselves.
-    wire h_active = (x_px < 640);
-    wire v_active = (y_px < 480);
+    wire h_active = (x_px < 800);
     wire cell_x   = (x_px >= MARGIN_X) && (x_px < MARGIN_X + COLS * CELL_W);
+    wire cell_y   = (y_px >= MARGIN_Y) && (y_px < MARGIN_Y + ROWS * CELL_H);
 
     // ------------------------------------------------------------------
     // Grid coordinates
     //
-    // 640 does not divide by 12, so the column is tracked with a counter rather
-    // than a divider.  The row is free: 480 / 16 is an exact power of two split.
+    // 800 does not divide by 12, so the column is tracked with a counter rather
+    // than a divider.  The row still doesn't need one: CELL_H is a power of two,
+    // so cy/row fall out of a slice once y_px is offset by MARGIN_Y -- unlike
+    // the old 640x480 mode, 600 doesn't divide evenly by 16, so that offset is
+    // no longer zero and can't be skipped.
     // ------------------------------------------------------------------
     reg [3:0] cx;
     reg [5:0] col;
@@ -75,8 +84,9 @@ module multi_seg_monitor (
         end
     end
 
-    wire [3:0] cy  = y_px[3:0];
-    wire [4:0] row = y_px[8:4];
+    wire [9:0] y_rel = y_px - MARGIN_Y;  // underflows harmlessly outside cell_y
+    wire [3:0] cy    = y_rel[3:0];
+    wire [5:0] row   = y_rel[9:4];
 
     // ------------------------------------------------------------------
     // Line buffer and prefetch
@@ -88,7 +98,7 @@ module multi_seg_monitor (
     // margin.
     // ------------------------------------------------------------------
     // Four row buffers, not two.  The 1 kB macro was already being bought for
-    // 416 B, and the spare capacity buys timing freedom instead: the host may run
+    // 512 B, and the spare capacity buys timing freedom instead: the host may run
     // between one and three rows ahead rather than being pinned to exactly one.
     // That is the difference between a host that has to track every row boundary
     // and one that can free-run at a fixed rate (SPEC.md section 4.3).
@@ -107,7 +117,7 @@ module multi_seg_monitor (
     end
 
     // Reads take 4 of every 12 cycles to prefetch the next digit, so writes have
-    // the other 8 -- about 21 MB/s against the 492 kB/s a source actually needs.
+    // the other 8 -- about 26.7 MB/s against the 606 kB/s a source actually needs.
     // Reads always win, which is what keeps the one-access-per-cycle guarantee
     // the memory wrapper depends on (SPEC.md section 8.1).
     wire lb_re    = fetch_en;
@@ -132,16 +142,16 @@ module multi_seg_monitor (
     // ------------------------------------------------------------------
     // Internal generator
     //
-    // Fills every one of the 1560 digits with a scrolling diagonal of hex values
+    // Fills every one of the 2368 digits with a scrolling diagonal of hex values
     // and a brightness band that varies across the row, so a single glance at the
     // screen exercises all 16 patterns, all 8 segments, the whole grid and the
     // gamma LUT.
     //
     // Row N+1 is built while row N is on screen, into the buffer half that is not
     // being read.  Writes take whatever cycles the renderer is not using, so a
-    // row's 208 bytes are placed long before that row is needed.
+    // row's 256 bytes are placed long before that row is needed.
     // ------------------------------------------------------------------
-    reg [4:0] gen_row;
+    reg [5:0] gen_row;
     reg [7:0] gen_ptr;
     reg [1:0] gen_buf;
     reg       gen_busy;
@@ -170,7 +180,7 @@ module multi_seg_monitor (
                 gen_ptr   <= 0;
                 gen_busy  <= 1'b1;
                 frame_ctr <= frame_ctr + 1'b1;
-            end else if (v_active && cy == 0 && x_px == 0 && row < ROWS - 1) begin
+            end else if (cell_y && cy == 0 && x_px == 0 && row < ROWS - 1) begin
                 // Start of digit row N: build row N+1 into the other buffer.
                 gen_row  <= row + 1'b1;
                 gen_buf  <= row[1:0] + 2'd1;
@@ -289,7 +299,7 @@ module multi_seg_monitor (
     end
 
     wire [3:0] seg_int   = cur_digit[{seg_idx, 2'b00} +: 4];
-    wire       visible   = seg_hit && cell_x && v_active;
+    wire       visible   = seg_hit && cell_x && cell_y;
     wire [3:0] gamma_idx = visible ? seg_int : 4'h0;
 
     gamma gamma_lut (

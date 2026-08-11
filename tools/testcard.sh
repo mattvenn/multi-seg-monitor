@@ -23,7 +23,7 @@ set -e
 here=$(cd "$(dirname "$0")" && pwd)
 out="$here/../test"
 
-# 624x480 is the grid, not the screen: 52 columns of 12 px by 30 rows of 16.
+# 768x592 is the grid, not the screen: 64 columns of 12 px by 37 rows of 16.
 # video2seg.py wants exactly that, one source pixel per display pixel.
 #
 # Everything is written as a target segment intensity 0-15 and then encoded as
@@ -33,8 +33,12 @@ out="$here/../test"
 # black segment that should be black looks the same whether it is stale or not,
 # so most of the frame could not show tearing at all.  The fade also stops at
 # 30% rather than reaching zero, for the same reason.
-ffmpeg -y -v error -f lavfi -i color=c=black:s=624x480 -frames:v 1 -vf \
-    "format=gray,geq=lum='if(gt(X\,500)*between(Y\,60\,300), 0, 255*pow(if(between(Y\,400\,440), 13, if(lt(hypot(X-300\,Y-180)\,95), 15, (floor(X/78)+1)*1.875*(1-0.7*Y/480)))/15\, 1/2.2))'" \
+#
+# Coordinates are the original 624x480 card's, scaled by 768/624 (X) and
+# 592/480 (Y) so the same shapes -- circle, bottom bar, black rectangle, 8
+# vertical bars -- land in the same relative place on the bigger grid.
+ffmpeg -y -v error -f lavfi -i color=c=black:s=768x592 -frames:v 1 -vf \
+    "format=gray,geq=lum='if(gt(X\,615)*between(Y\,74\,370), 0, 255*pow(if(between(Y\,493\,543), 13, if(lt(hypot(X-369\,Y-222)\,117), 15, (floor(X/96)+1)*1.875*(1-0.7*Y/592)))/15\, 1/2.2))'" \
     "$out/testcard.png"
 
 cd "$here"

@@ -5,7 +5,7 @@
 // 
 // Create Date:    09:34:23 30/09/2017 
 // Module Name:    vga_controller
-// Description:    Basic control for 640x480@72Hz VGA signal.
+// Description:    Basic control for 800x600@60Hz VGA signal.
 //
 // Dependencies: 
 //
@@ -20,46 +20,48 @@
 //
 //////////////////////////////////////////////////////////////////////////////////
 module VgaSyncGen (
-            input wire       px_clk,        // Input clock: 31.5MHz
+            input wire       px_clk,        // Input clock: 40MHz
             input wire       reset,         // reset
-            output wire      hsync,         // Horizontal sync out
-            output wire      vsync,         // Vertical sync out
-            output reg [9:0] x_px,          // X position for actual pixel.
-            output reg [9:0] y_px,          // Y position for actual pixel.
-            output wire      activevideo
+            output wire       hsync,        // Horizontal sync out
+            output wire       vsync,        // Vertical sync out
+            output reg [10:0] x_px,         // X position for actual pixel.
+            output reg [9:0]  y_px,         // Y position for actual pixel.
+            output wire       activevideo
          );
 
     /*
-    http://www.epanorama.net/faq/vga2rgb/calc.html
-    [*User-Defined_mode,(640X480)]
-    PIXEL_CLK   =   31500
-    H_DISP      =   640
-    V_DISP      =   480
-    H_FPORCH    =   24
-    H_SYNC      =   40
-    H_BPORCH    =   128
-    V_FPORCH    =   9
-    V_SYNC      =   3
-    V_BPORCH    =   28
+    VESA DMT 800x600@60 -- the same standard the previous 640x480@72 mode used.
+    PIXEL_CLK   =   40000
+    H_DISP      =   800
+    V_DISP      =   600
+    H_FPORCH    =   40
+    H_SYNC      =   128
+    H_BPORCH    =   88
+    V_FPORCH    =   1
+    V_SYNC      =   4
+    V_BPORCH    =   23
     */
 
     // Video structure constants.
-    parameter activeHvideo = 640;               // Width of visible pixels.
-    parameter activeVvideo =  480;              // Height of visible lines.
-    parameter hfp = 24;                         // Horizontal front porch length.
-    parameter hpulse = 40;                      // Hsync pulse length.
-    parameter hbp = 128;                        // Horizontal back porch length.
-    parameter vfp = 9;                          // Vertical front porch length.
-    parameter vpulse = 3;                       // Vsync pulse length.
-    parameter vbp = 28;                         // Vertical back porch length.
+    parameter activeHvideo = 800;               // Width of visible pixels.
+    parameter activeVvideo =  600;              // Height of visible lines.
+    parameter hfp = 40;                         // Horizontal front porch length.
+    parameter hpulse = 128;                     // Hsync pulse length.
+    parameter hbp = 88;                         // Horizontal back porch length.
+    parameter vfp = 1;                          // Vertical front porch length.
+    parameter vpulse = 4;                       // Vsync pulse length.
+    parameter vbp = 23;                         // Vertical back porch length.
     parameter blackH = hfp + hpulse + hbp;      // Hide pixels in one line.
     parameter blackV = vfp + vpulse + vbp;      // Hide lines in one frame.
     parameter hpixels = blackH + activeHvideo;  // Total horizontal pixels.
     parameter vlines = blackV + activeVvideo;   // Total lines.
 
-    // Registers for storing the horizontal & vertical counters.
-    reg [9:0] hc;
-    reg [9:0] vc;
+    // Registers for storing the horizontal & vertical counters. hc is 11 bits
+    // because hpixels can exceed the 10-bit range that used to be enough when
+    // this only ever ran 640x480 (832 total) -- e.g. 800x600's 1056 total needs
+    // it. vc stays 10 bits; every mode built so far keeps vlines under 1024.
+    reg [10:0] hc;
+    reg [9:0]  vc;
 
     // Counting pixels.
     always @(posedge px_clk)

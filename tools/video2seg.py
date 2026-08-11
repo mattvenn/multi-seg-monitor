@@ -2,13 +2,13 @@
 """
 Convert video to a segment intensity stream for the Multi Segment Monitor.
 
-Each of the 12480 segments gets its own 4 bit brightness, averaged from the
+Each of the 18944 segments gets its own 4 bit brightness, averaged from the
 source pixels its rectangle covers -- the same idea as the fragment shader in
 the Sea of Segments installation, and the reason per-segment brightness is in
 the design at all.  Sampling one pixel per digit instead would throw away most
 of the resolution.
 
-Output is raw frames of 6240 bytes, ready to copy to the demoboard.
+Output is raw frames of 9472 bytes, ready to copy to the demoboard.
 
     ./video2seg.py clip.mp4 clip.seg --fps 24
 
@@ -64,7 +64,7 @@ def frame_to_segments(linear):
 
     Every cell has the same layout, so reshaping to (row, cy, col, cx) turns
     "average the pixels under this segment" into one slice and mean per segment
-    rather than 12480 separate lookups.
+    rather than 18944 separate lookups.
     """
     cells = linear.reshape(
         segments.ROWS, segments.CELL_H, segments.COLS, segments.CELL_W
@@ -87,7 +87,7 @@ def pack(intensity):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("input", help="any video ffmpeg can read")
-    ap.add_argument("output", help="raw segment stream, 6240 bytes per frame")
+    ap.add_argument("output", help="raw segment stream, 9472 bytes per frame")
     ap.add_argument("--fps", type=float, default=24.0)
     ap.add_argument(
         "--gamma",

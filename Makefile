@@ -10,8 +10,8 @@ TT_TOOLS ?= $(HOME)/asic/tt-support-tools
 PORT     ?= /dev/ttyACM4
 
 TOP        = tt_um_multi_seg_monitor
-FREQ       = 31.5
-CLOCKRATE  = 31500000  # FREQ in Hz, for tt_fpga.py --clockrate
+FREQ       = 40
+CLOCKRATE  = 40000000  # FREQ in Hz, for tt_fpga.py --clockrate
 PCF        = $(TT_TOOLS)/fpga/tt_fpga_fabricfoxv2.pcf
 WRAPPER    = $(TT_TOOLS)/fpga/tt_fpga_top.v
 

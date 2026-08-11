@@ -10,7 +10,7 @@
 // signals, so what lands in the file is what the pmod would see.
 //
 // Writing the file from Verilog rather than from cocotb matters: it lets the
-// test advance a whole frame in a single ClockCycles await instead of 432640
+// test advance a whole frame in a single ClockCycles await instead of 663168
 // Python callbacks.
 //
 module tb ();
@@ -56,16 +56,16 @@ module tb ();
     wire [3:0] px_b = uo_out[7:4];
 
     // Pixel position measured from the sync edges, so the capture depends only
-    // on what leaves the chip.  640x480@72: from the falling edge of hsync comes
-    // 40 sync + 128 back porch = 168 before active video; from the falling edge
-    // of vsync comes 3 sync + 28 back porch = 31 lines.
+    // on what leaves the chip.  800x600@60: from the falling edge of hsync comes
+    // 128 sync + 88 back porch = 216 before active video; from the falling edge
+    // of vsync comes 4 sync + 23 back porch = 27 lines.
     //
     // H_LEAD is one less than that because detecting the edge costs this
     // testbench a cycle: tb_hc reaches 0 one cycle after hsync actually falls.
     // The vertical count is free of that because it advances on hsync edges,
     // which carry the same latency on both sides of the comparison.
-    localparam H_LEAD = 168 - 1;
-    localparam V_LEAD = 31;
+    localparam H_LEAD = 216 - 1;
+    localparam V_LEAD = 27;
 
     reg [10:0] tb_hc;
     reg [10:0] tb_vc;
@@ -74,8 +74,8 @@ module tb ();
     // it.  Without this the first line would be counted twice.
     reg        vsync_seen;
 
-    wire px_active = (tb_hc >= H_LEAD) && (tb_hc < H_LEAD + 640) &&
-                     (tb_vc >= V_LEAD) && (tb_vc < V_LEAD + 480);
+    wire px_active = (tb_hc >= H_LEAD) && (tb_hc < H_LEAD + 800) &&
+                     (tb_vc >= V_LEAD) && (tb_vc < V_LEAD + 600);
 
     integer ppm;
     reg     dumping;
@@ -121,7 +121,7 @@ module tb ();
         if (vsync_d && !vs) begin
             if (dump_en && !dumping && !dump_done) begin
                 ppm = $fopen("frame.ppm", "w");
-                $fwrite(ppm, "P3\n640 480\n255\n");
+                $fwrite(ppm, "P3\n800 600\n255\n");
                 dumping <= 1'b1;
             end else if (dumping) begin
                 $fclose(ppm);
