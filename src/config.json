@@ -17,8 +17,11 @@
 
   "//": "CLOCK_PERIOD - Increase this in case you are getting setup time violations.",
   "//": "The value is in nanoseconds, so 20ns == 50MHz.",
-  "//": "31.75ns == 31.5MHz, the VGA pixel clock this design is built around (SPEC.md section 6).",
-  "CLOCK_PERIOD": 31.75,
+  "//": "25.0ns == 40MHz, the 800x600@60 VGA pixel clock this branch is built around",
+  "//": "(docs/superpowers/specs/2026-08-11-800x600-mode-design.md). main's 640x480@72",
+  "//": "mode runs at 31.75ns/31.5MHz instead (SPEC.md section 6) -- keep this in step",
+  "//": "with whichever mode's RTL src/VgaSyncGen.v actually generates.",
+  "CLOCK_PERIOD": 25.0,
 
   "//": "Hold slack margin - Increase them in case you are getting hold violations.",
   "PL_RESIZER_HOLD_SLACK_MARGIN": 0.1,

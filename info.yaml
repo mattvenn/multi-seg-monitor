@@ -3,9 +3,9 @@ project:
   title:        "Multi Segment Monitor"
   author:       "Matt Venn & Claude"
   discord:      "mattvenn"
-  description:  "Simulates a 52x30 array of 7 segment displays on a VGA screen"
+  description:  "Simulates a 64x37 array of 7 segment displays on a VGA screen"
   language:     "Verilog"
-  clock_hz:     31500000
+  clock_hz:     40000000
 
   # How many tiles your design occupies? A single tile is about 167x108 uM.
   tiles: "3x2"
