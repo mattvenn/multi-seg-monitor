@@ -323,3 +323,33 @@ less duration at a given fps than it used to — worth remembering when reusing 
 `--fps` values from before this change. Existing `.seg` files predate the frame
 size change and are silently the wrong shape now, not just a different picture:
 they need regenerating from source, not copying over.
+
+## 12. No longer FPGA-only: ASIC config brought into step (2026-08-13)
+
+§11 called this mode FPGA-only because the RTL had moved to a 40 MHz pixel clock
+while `info.yaml` and `src/config.json` still described the ASIC build at 31.5 MHz
+— hardening it as-is would have signed off timing against the wrong target
+entirely. That mismatch is why it stayed off `main`.
+
+Fixed by updating both to match the RTL: `info.yaml`'s `clock_hz` and
+`src/config.json`'s `CLOCK_PERIOD` now say 40 MHz / 25.0 ns, and the description
+field's stale "52x30" became "64x37". Two things confirmed before trusting the
+change:
+
+- `make -C test IHP_SRAM=1` — all four tests pass against the real macro
+  behavioural model, including a full frame render and a full frame stream, which
+  between them touch every one of the line buffer's 1024 addresses
+  (`{buf[1:0], col[5:0], byte[1:0]}`, four 256-byte rows exactly filling the 1 kB
+  macro with no spare left).
+- The `gds.yaml` hardening run this unblocked closes timing on `ihp-sg13g2` at the
+  corrected 25.0 ns constraint. This is the number that actually mattered: the
+  previous branch state had never been checked against it, only against the
+  leftover 31.75 ns figure, which is a substantially easier target and would not
+  have caught a real shortfall.
+
+`precheck`'s 2672 KLayout DRC violations are unrelated and unmoved — still
+entirely inside the IHP SRAM macro's own subcells (§8.2, `CLAUDE.md`), same as on
+`main` before this branch existed. Nothing here changes that blocker.
+
+With both of those confirmed, this mode merged into `main` — it is the new
+default, not an FPGA-only branch anymore.
