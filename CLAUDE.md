@@ -4,11 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Tiny Tapeout ASIC that renders a 52x30 grid of 7-segment digits (1560 digits,
-12480 segments, 4 bits of brightness each) as a 640x480@72Hz VGA signal. Data is
+A Tiny Tapeout ASIC that renders a 64x37 grid of 7-segment digits (2368 digits,
+18944 segments, 4 bits of brightness each) as an 800x600@60Hz VGA signal. Data is
 streamed in a byte at a time by the demoboard's RP2350. `SPEC.md` carries the full
 design and the reasoning behind the rejected alternatives; read it before proposing
 an architectural change, because most obvious ones were already considered there.
+It documents the original 640x480@72Hz mode's arithmetic throughout -- the digit
+geometry and every architectural decision still hold at 800x600 (`resolution_discussion.md`
+section 11-12 covers why and what changed), but its numeric tables are stale by the
+resolution ratio; don't copy a number out of `SPEC.md` without checking which mode
+it was computed for.
 
 ## Toolchain
 
@@ -50,9 +55,10 @@ drawn. Everything below follows from that.
 `tt_um_multi_seg_monitor.v` is the TT wrapper and does nothing but pin mapping.
 `multi_seg_monitor.v` is the core, and it is where the interesting timing lives:
 
-- **Line buffer** (`line_buffer.v`) holds **four** rows of 208 bytes in a 1 kB
-  address space. Four rather than two is what lets the host free-run at a fixed byte
-  rate between one and three rows ahead instead of handshaking every row.
+- **Line buffer** (`line_buffer.v`) holds **four** rows of 256 bytes, exactly filling
+  the 1 kB address space with no spare left. Four rather than two is what lets the
+  host free-run at a fixed byte rate between one and three rows ahead instead of
+  handshaking every row.
 - **Single-port discipline.** The renderer reads 4 of every 12 cycles to prefetch
   the next digit; `wr_grant = !lb_re` gives writes the other 8. `we` and `re` must
   **never** be high in the same cycle — on the IHP macro that combination is
@@ -74,11 +80,13 @@ drawn. Everything below follows from that.
 
 ### Pacing is the load-bearing invariant
 
-A digit row is 16 scanlines and 208 bytes, so `16 * 832 / 208 = 64` pixel clocks per
+A digit row is 16 scanlines and 256 bytes, so `16 * 1056 / 256 = 66` pixel clocks per
 byte, **exactly**. No remainder means a fixed-rate host tracks the raster
-indefinitely. The host's whole head start is vertical blanking, 819 µs, and anything
+indefinitely. The host's whole head start is vertical blanking, 713 µs, and anything
 spent before its first byte comes straight off it — the budget from vsync to first
-byte is about **450 µs**. This is not theoretical: exceeding it is what tore the
+byte is about **450 µs**, same as before: `resolution_discussion.md` section 11
+found the delay-sweep tearing threshold itself didn't move when the resolution did,
+only the margin above it shrank. This is not theoretical: exceeding it is what tore the
 picture on hardware, and `make -C test delay-sweep` reproduces it in simulation.
 See "If the picture tears" in `README.md`.
 

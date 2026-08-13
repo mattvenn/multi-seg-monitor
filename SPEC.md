@@ -6,6 +6,16 @@ An ASIC that simulates a large array of 7-segment displays on a VGA monitor, bui
 to the Tiny Tapeout standard. Segment data is streamed in from one of three sources
 and rendered by racing the beam — the chip holds no frame.
 
+> **2026-08-13: resolution moved to 800x600@60 (40 MHz), everything below is
+> 640x480@72 (31.5 MHz).** The architecture, geometry decisions and reasoning
+> behind rejected alternatives on this page all still hold — only the numbers
+> that are downstream of the specific resolution (byte counts, timing tables,
+> bandwidth figures) are stale, by the 640x480→800x600 ratio throughout. See
+> `resolution_discussion.md` sections 11-12 for why the change was made and the
+> current numbers, and `README.md` / `docs/info.md` for the current-state
+> summary. This page is kept as-is rather than rewritten so it stays a true
+> record of the original design discussion.
+
 ---
 
 ## 1. Display geometry

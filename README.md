@@ -9,10 +9,11 @@ An ASIC does the VGA signal generation, using the Tiny Tapeout standard.
 
 The RP2350 on the demoboard interfaces with the ASIC to send data.
 
-A 52 x 30 grid of digits — 1560 digits, 12480 segments — each segment with its own
+A 64 x 37 grid of digits — 2368 digits, 18944 segments — each segment with its own
 4 bit brightness. The chip holds no framebuffer: it races the beam, keeping only the
 digit row it is currently drawing. See [SPEC.md](SPEC.md) for the full design and the
-reasoning behind it.
+reasoning behind it, and [resolution_discussion.md](resolution_discussion.md) section
+11-12 for why the resolution moved from SPEC.md's original 640x480@72 to 800x600@60.
 
 # Controls
 
@@ -29,9 +30,9 @@ turns any clip into segment intensities.
 
 | | |
 |---|---|
-| VGA | 640x480 @ 72 Hz, 31.5 MHz |
-| FPGA | 431 / 5280 logic cells (8%), 2 / 30 EBR |
-| Timing | 39.14 MHz max, passes at 31.5 MHz |
+| VGA | 800x600 @ 60 Hz, 40 MHz |
+| FPGA | not re-measured since the move to 800x600 (was 431 / 5280 logic cells, 8%, 2 / 30 EBR, at 640x480) |
+| Timing | 39.58 MHz max, ~1% short of the 40 MHz target — runs clean on real UP5K hardware anyway (resolution_discussion.md §11) |
 | Tests | 4 cocotb + 3 converter, all passing, 3 frames against gold images |
 
 **Working on the FPGA breakout.** The internal generator and the stream port both run
@@ -45,9 +46,11 @@ budget of roughly 450 µs. Measured on a scope, not inferred — see
 [If the picture tears](#if-the-picture-tears) for the captures and for why the
 handler, not the restart code, was the slow part.
 
-For the ASIC, the GDS builds, LVS matches and gate level simulation passes, but Tiny
-Tapeout's precheck fails on 2672 KLayout DRC violations. All of them are inside the
-IHP SRAM macro's own cells rather than in this design.
+For the ASIC, `info.yaml`/`src/config.json` now target 40 MHz to match the RTL, and
+the GDS builds, LVS matches, timing closes at that constraint on `ihp-sg13g2`, and
+gate level simulation passes. Tiny Tapeout's precheck still fails on 2672 KLayout DRC
+violations, unrelated to any of this — all of them are inside the IHP SRAM macro's
+own cells rather than in this design.
 
 # Building
 
@@ -68,7 +71,7 @@ or, equivalently:
     make flash TT_TOOLS=/path/to/tt-support-tools PORT=/dev/ttyACM4
 
 `flash` rebuilds the bitstream if needed, then runs `tt_fpga.py configure --upload
---set-default --clockrate 31500000` against it. `PORT` defaults to `/dev/ttyACM4`.
+--set-default --clockrate 40000000` against it. `PORT` defaults to `/dev/ttyACM4`.
 
 The frame test captures from the output pins and writes `test/frame.png`, so geometry
 can be iterated without hardware. That loop is what caught the first segment layout
@@ -105,7 +108,7 @@ mode select sit on `uio[6]` and `uio[7]`, which is where PmodVGA leaves two pins
 connected.
 
 **1. Internal generator, no firmware.** Leave `uio[7]` low and the design ignores the
-stream port entirely. You should get a 52x30 grid of hex digits scrolling diagonally
+stream port entirely. You should get a 64x37 grid of hex digits scrolling diagonally
 with brightness bands across it. Compare against `test/gold/generator.png`, which is
 the same thing from simulation.
 
@@ -133,9 +136,9 @@ This is the failure the hardware run actually produced, and it is worth recognis
 on sight because the cause is not where it appears to be.
 
 Each digit row is drawn from a line buffer the host is still filling. The renderer
-re-reads the whole 208 byte row on every one of its 16 scanlines — 832 clocks — while
-the host takes 13312 to fill it, so the host has to be a **full row ahead**. It builds
-that lead during vertical blanking, 819 µs, and anything spent before the first byte
+re-reads the whole 256 byte row on every one of its 16 scanlines — 1056 clocks — while
+the host takes 16896 to fill it, so the host has to be a **full row ahead**. It builds
+that lead during vertical blanking, 713 µs, and anything spent before the first byte
 comes straight off it.
 
 `make -C test delay-sweep` puts numbers on it by delaying the testbench host's first
@@ -143,10 +146,10 @@ byte after vsync, 0 to 1000 µs, and writing a frame for each:
 
 | Delay before first byte | Lead | Result |
 |---|---|---|
-| ≤ 400 µs | ≥ 206 bytes | clean |
-| 500 µs | 157 bytes | tears from column 42 |
-| 600 µs | 108 bytes | tears from column 29 |
-| 800 µs | 9 bytes | tears from column 4 |
+| ≤ 400 µs | ≥ 190 bytes | clean |
+| 500 µs | 129 bytes | tears from column 52 |
+| 600 µs | 68 bytes | tears from column 36 |
+| 800 µs | -53 bytes | tears from column 4 |
 
 So the budget from vsync to the first byte is **about 450 µs**, and what blew it was
 the *dispatch*, not the handler body.
@@ -186,19 +189,21 @@ from elsewhere, not as a repeat.
 
 # Playing video
 
-    tools/video2seg.py clip.mp4 video.seg --fps 24    # 6240 bytes per frame
+    tools/video2seg.py clip.mp4 video.seg --fps 24    # 9472 bytes per frame
     tools/seg2png.py video.seg preview.png --frame 30 # check it before deploying
 
-Each of the 12480 segments averages the source pixels its own rectangle covers, in
+Each of the 18944 segments averages the source pixels its own rectangle covers, in
 linear light — one sample per digit would throw away most of the resolution that
 per-segment brightness exists to provide.
 
-Copy the `.seg` file and `firmware/seg_player.py` to the demoboard. At 6240 bytes per
-frame a 4 MB flash holds about 26 seconds at 24 fps.
+Copy the `.seg` file and `firmware/seg_player.py` to the demoboard. Frames grew 52%
+over the 640x480 mode's 6240 bytes (`resolution_discussion.md` §11), so the same 4 MB
+flash now holds about 17 seconds at 24 fps rather than 26 — existing `.seg` files
+predate the frame size change and need regenerating, not reusing.
 
-The chip has no framebuffer, so the player re-pushes every displayed frame at 72.8 Hz
-(454 kB/s) regardless of the video's own rate. Pacing is free: a digit row is 16
-scanlines and 208 bytes, so one byte every 64 pixel clocks tracks the raster exactly,
+The chip has no framebuffer, so the player re-pushes every displayed frame at 60.3 Hz
+(≈571 kB/s) regardless of the video's own rate. Pacing is free: a digit row is 16
+scanlines and 256 bytes, so one byte every 66 pixel clocks tracks the raster exactly,
 with no remainder to accumulate.
 
 # Inspiration
