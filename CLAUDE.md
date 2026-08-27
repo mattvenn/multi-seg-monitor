@@ -143,10 +143,12 @@ macro's own subcells (`RM_IHPSG13_1P_BITKIT_*`, `_BLDRV`, `_COLCTRL2`), none in 
 design's logic. `src/config.json` skips DRC locally but precheck does not honour
 that.
 
-`info.yaml` says `tiles: "3x2"` (636.96 x 313.74 µm). Some comments in `SPEC.md`
-section 8.2 and `src/config.json` still reason about the earlier 4x2; the macro
-placement at `[42, 80]` `R90` fits either. `R90` is not optional — the macro is
-336.46 µm tall upright, which does not fit in 313.74 µm of die height.
+`info.yaml` says `tiles: "2x2"` (419.52 x 313.74 µm), down from 3x2 and 4x2 before
+that. Every TT `Nx2` block is 313.74 µm tall, so shrinking only ever took width away
+and the macro placement at `[42, 80]` `R90` has survived all three unchanged. `R90`
+is not optional — the macro is 336.46 µm tall upright, which does not fit in
+313.74 µm of die height. At 2x2 the macro is 38% of the die, so placement density and
+routing congestion around it are the things to watch, not the coordinate.
 
 ## Conventions
 

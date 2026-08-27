@@ -48,11 +48,18 @@
   "//": "ever reports an unknown instance, re-derive it with:",
   "//": "  yosys -p 'read_verilog -DIHP_SRAM -sv src/*.v; hierarchy -top tt_um_multi_seg_monitor; flatten; write_verilog out.v'",
   "//": "",
-  "//": "location is Uri's [42, 80] unchanged. A 4x2 block is the same height as the",
-  "//": "2x2 he used (313.74um) and only wider, so the same y clears the same rails,",
-  "//": "and keeping x low leaves one contiguous region for logic rather than two strips.",
+  "//": "location is Uri's [42, 80] unchanged, and this is now his die too: a 2x2 is",
+  "//": "419.52 x 313.74um, the same block he placed it in. Rotated the macro spans",
+  "//": "x 42-378.46 and y 80-226.88, so it clears the same rails it always did.",
   "//": "R90 is not optional: the macro is 336.46 x 146.88um (h x w) and 336.46 does not",
   "//": "fit in 313.74um of die height upright.",
+  "//": "",
+  "//": "At 2x2 the macro is 38% of the die and the free area is an L of four bands --",
+  "//": "419x80um below it, 419x87um above, and 42/41um strips either side. If global",
+  "//": "placement fails (GPL-0302) raise PL_TARGET_DENSITY_PCT, and if the router",
+  "//": "chokes on the macro obstruction, slide the macro down (e.g. [42, 20]) to merge",
+  "//": "the two horizontal bands into one. Move it only if the flow complains --",
+  "//": "[42, 80] is the coordinate with silicon behind it.",
   "MACROS": {
     "RM_IHPSG13_1P_1024x8_c2_bm_bist": {
       "instances": {

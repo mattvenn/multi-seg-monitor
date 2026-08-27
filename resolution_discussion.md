@@ -214,8 +214,9 @@ Each macro is 336.46 × 146.88 µm, and R90 is not optional (SPEC §8.2).
 - Stacked: 293.76 µm of 313.74 µm of die height — ~20 µm, too tight once power
   straps land.
 
-So 4×2, which is the geometry SPEC §8.2 and `src/config.json` still reason about
-anyway.
+So this option needs a 4×2. That was a free choice when it was written and SPEC §8.2
+reasoned about the same block; the single-macro design has since dropped to a 2×2, so
+a second macro now costs four extra tiles, not zero.
 
 ---
 

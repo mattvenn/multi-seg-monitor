@@ -368,11 +368,15 @@ IHP is the first ASIC target, so `line_buffer.v` now carries the macro behind an
 default simulation use; defined it instantiates the macro. Nothing above the wrapper
 changes between the two.
 
-**Fit.** The macro is 336.46 × 146.88 µm (h × w), 49,419 µm². A TT IHP 4×2 block is
-854.40 × 313.74 µm, so it does **not** fit upright — 336.46 exceeds the 313.74 of
-height available. Rotated 90° it becomes 336.46 wide × 146.88 high and drops in with
-room to spare, leaving ~518 µm of width for logic. The same is true of the 2×2
-(419.52 × 313.74) this document previously claimed it fitted: true, but only rotated.
+**Fit.** The macro is 336.46 × 146.88 µm (h × w), 49,419 µm². Every TT IHP `N`×2
+block is 313.74 µm tall, so it does **not** fit upright in any of them — 336.46
+exceeds the height available. Rotated 90° it becomes 336.46 wide × 146.88 high and
+drops in. The design now hardens as a **2×2**, 419.52 × 313.74 µm: the macro sits at
+`[42, 80]` `R90` spanning x 42–378.46 and y 80–226.88, leaving ~82,000 µm² for logic
+in an L of four bands (419 × 80 below, 419 × 87 above, 42 and 41 µm strips either
+side). That is ample for ~1,250 cells of logic, but the macro is 38% of the die and
+an obstruction on the lower metals, so congestion is the constraint here rather than
+area.
 
 **Pin settings**, matching `tt_um_urish_sram_test` on ttihp0p2 — the same macro and
 the only silicon-proven use of it:
@@ -453,6 +457,12 @@ monitor and a real RP2350 before tapeout.
 | **Total** | **~5.5 tiles** |
 
 Target is ≤8 tiles; up to 4 tiles high is available.
+
+This estimate is what sized the first submissions at 4×2 and then 3×2. It reads
+high: the macro is 49,419 µm² against the 32,905 µm² of a nominal tile, so it is
+closer to 1.5 tiles than 4, and the logic fits alongside it rather than beside it.
+The design hardens as a **2×2** (§8.2), and the FPGA build corroborates the logic
+half — 431 LC on the UP5K.
 
 The stream interface was estimated at 400 cells while it had to speak QSPI. A byte
 push port with a write pointer is a fraction of that — one of the smaller reasons
