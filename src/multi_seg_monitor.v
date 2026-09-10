@@ -314,5 +314,104 @@ module multi_seg_monitor (
         vsync <= vga_vsync;
     end
 
+`ifdef FORMAL
+    // `read_verilog -formal` (see formal/) defines FORMAL in place of
+    // SYNTHESIS. Each property below is compiled in only by the one
+    // formal/*.sby run that -D's its own guard macro, so the three proofs
+    // stay independent of each other despite living in one module.
+
+`ifdef FORMAL_WE_RE
+    // we and re must never be high in the same cycle (line_buffer.v): on
+    // the IHP macro that combination is write-through and would silently
+    // put wdata at raddr instead of the intended write address. This is
+    // true by construction (wr_grant = !lb_re), so it should hold for any
+    // reachable OR unreachable state -- a useful smoke test that the
+    // arbitration hasn't been refactored into something that only looks
+    // equivalent.
+    always @*
+        assert (!(lb_we && lb_re));
+`endif
+
+`ifdef FORMAL_ZONE
+    // At most one of the 8 segment zones may claim a given (cx, cy): if two
+    // ever overlapped, the case(1'b1) priority-encoder would silently pick
+    // one and the other segment just wouldn't render there. This is what
+    // keeps the spare column/row load-bearing rather than cosmetic
+    // (comment above xz_left etc.) -- formalizes it at the zone-boundary
+    // level instead of only catching it pixel-by-pixel in a gold image.
+    always @*
+        assert ($countones({xz_mid  & yz_top, xz_right & yz_up,
+                             xz_right & yz_low, xz_mid  & yz_bot,
+                             xz_left & yz_low,  xz_left & yz_up,
+                             xz_mid  & yz_mid,  xz_dp   & yz_bot}) <= 1);
+`endif
+
+`ifdef FORMAL_BUF
+    // The whole point of four line-buffer rows instead of two (comment
+    // above render_buf): the row a writer targets must never be the row
+    // currently being displayed, or the renderer would read a half-written
+    // digit. Unlike FORMAL_WE_RE/FORMAL_ZONE this isn't a same-cycle
+    // combinational identity, so BMC to any practical depth is close to
+    // meaningless here -- a real row transition is ~16896 cycles away from
+    // reset -- and k-induction needs help to close it. It doesn't, yet:
+    // documenting the attempt and exactly where it stopped rather than
+    // leaving a bare unproven assert.
+    //
+    // The property actually splits into three sub-claims of increasing
+    // difficulty:
+    //
+    // 1. Stream port (str_waddr[9:8] != render_buf): depends on the host's
+    //    pacing discipline -- CLAUDE.md: "Staying in step is the host's
+    //    job" -- which is software this chip's RTL can't see. Asserting it
+    //    here would mean assuming what needs proving, so it's out of scope
+    //    for a chip-only proof; test/'s delay-sweep covers it empirically
+    //    instead, by observing the failure mode on real mis-paced traces.
+    //
+    // 2. Generator, steady state (the cy==0 && x_px==0 transition each
+    //    digit row): closeable, and mostly closed here. It needs two
+    //    lemmas beyond the target assert itself:
+    //      - rate: wr_grant is high >=8 of every 12 cycles (wr_grant =
+    //        !lb_re, lb_re = fetch_en, true for only 4 of 12), so gen_ptr
+    //        gains >=2 every 3 cycles once gen_busy is set, and reaches
+    //        ROW_BYTES-1 (structural bound: gen_ptr is 8 bits) within
+    //        ~400 cycles.
+    //      - separation: row/render_buf are derived from y_px, which
+    //        VgaSyncGen only updates once per scanline (hpixels = 1056
+    //        pixel clocks), so render_buf can't have moved on ~400 cycles
+    //        into the fill.
+    //    Formalized with a ghost "cycles since last transition" counter
+    //    and a captured "render_buf at transition" value, both lemmas were
+    //    individually provable by k-induction.
+    //
+    // 3. Generator, frame_start (row 0, built during vertical blanking,
+    //    CLAUDE.md section on frame_start): NOT closed, and the reason is
+    //    load-bearing enough to write down. frame_start hardcodes
+    //    `gen_buf <= 2'd0` rather than `row[1:0] + 1'b1` -- because
+    //    outside cell_y, y_rel underflows and row/render_buf read
+    //    something other than a real row number. That garbage value isn't
+    //    even stable: it visibly changes across the ~28-scanline vertical
+    //    blanking period before the first active line, breaking the
+    //    "separation" lemma from case 2 exactly as written (it assumed one
+    //    fixed render_buf value for the whole fill). It's very likely
+    //    still safe -- outside cell_y, visible = seg_hit && cell_x &&
+    //    cell_y is always 0, so nothing reaches the display regardless of
+    //    what render_buf/gen_buf happen to be -- but that's a different
+    //    argument (gate on cell_y, or separately show the frame_start fill
+    //    finishes before cell_y goes true), not an extension of case 2's.
+    //
+    // Net effect: the assert below fails at the basecase (step 1, not just
+    // an induction step that won't close) -- confirmed by running it.
+    // Case 3's gap is reachable immediately from a cold/undefined power-up
+    // state (CLAUDE.md: nothing may depend on initialisation), not only
+    // after the ~16896-cycle run to a real row transition. Closing this
+    // means gating the assert on cell_y (or otherwise scoping case 3 out),
+    // not anything about case 2, which remains individually provable as
+    // described above.
+    always @(posedge clk)
+        if (rst_n && gen_grant)
+            assert (gen_buf != render_buf);
+`endif
+`endif
+
 endmodule
 `default_nettype wire

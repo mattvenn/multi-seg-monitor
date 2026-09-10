@@ -1,0 +1,12 @@
+[options]
+mode prove
+
+[engines]
+smtbmc
+
+[script]
+read -formal VgaSyncGen.v
+prep -top VgaSyncGen
+
+[files]
+../src/VgaSyncGen.v

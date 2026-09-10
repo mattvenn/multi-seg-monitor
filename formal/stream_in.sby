@@ -1,0 +1,13 @@
+[options]
+mode prove
+
+[engines]
+smtbmc
+
+[script]
+read -formal stream_in.v
+chparam -set ROW_BYTES 256 -set ROWS 37 stream_in
+prep -top stream_in
+
+[files]
+../src/stream_in.v

@@ -25,7 +25,7 @@ SOURCES  = src/tt_um_multi_seg_monitor.v \
 
 BUILD    = build
 
-.PHONY: bitstream flash test clean
+.PHONY: bitstream flash test formal clean
 
 bitstream: $(BUILD)/$(TOP).bin
 
@@ -58,6 +58,13 @@ test:
 	cd tools && python3 test_video2seg.py
 	cd tools && python3 test_segments.py
 
+# Formal properties (SymbiYosys). Separate from `test`: these check RTL
+# invariants directly rather than simulated behaviour, and one property
+# (buf_isolation) is still open -- see formal/Makefile.
+formal:
+	$(MAKE) -C formal
+
 clean:
 	rm -rf $(BUILD) src/_tt_fpga_top.v
 	$(MAKE) -C test clean
+	$(MAKE) -C formal clean

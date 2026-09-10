@@ -104,5 +104,32 @@ module VgaSyncGen (
             y_px <= vc - blackV;
         end
      end
+
+`ifdef FORMAL
+    // `read_verilog -formal` (see formal/) defines FORMAL in place of
+    // SYNTHESIS, so none of this reaches synthesis or ordinary simulation.
+
+    // hc/vc are undefined pre-reset like any other register here, so the
+    // bound only has to hold once a real reset has actually happened --
+    // k-induction otherwise explores states that just power up already
+    // out of range, which reset never claimed to rule out.
+    reg f_reset_done = 1'b0;
+    always @(posedge px_clk)
+        if (reset)
+            f_reset_done <= 1'b1;
+
+    // The wraparound compares (hc < hpixels-1, vc < vlines-1) are the only
+    // thing standing between this counter and walking off the end of the
+    // line/frame -- exactly the kind of off-by-one that changed silently
+    // between the 640x480 and 800x600 modes (resolution_discussion.md
+    // section 11). k-induction, not full BMC replay: the invariant only
+    // needs one step to re-establish itself, not a full frame of history.
+    always @(posedge px_clk)
+        if (f_reset_done) begin
+            assert (hc < hpixels);
+            assert (vc < vlines);
+        end
+`endif
+
  endmodule
 `default_nettype wire

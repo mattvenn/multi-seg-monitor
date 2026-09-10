@@ -1,0 +1,27 @@
+[options]
+# mode prove: not mode bmc. BMC to any practical depth can't reach a real
+# row transition (~16896 cycles from reset) so it would only ever exercise
+# the reset window -- not a meaningful check on its own, just quieter about
+# it. mode prove's basecase is the honest failure here, not the induction
+# step: it fails at step 1, because the design allows undefined power-up
+# state (CLAUDE.md: nothing may depend on initialisation) and case 3's gap
+# (frame_start garbage render_buf -- see the FORMAL_BUF comment in
+# multi_seg_monitor.v) is reachable from it immediately, not only after the
+# ~16896 cycles a real row transition needs.
+mode prove
+depth 20
+
+[engines]
+smtbmc
+
+[script]
+read -formal -D FORMAL_BUF multi_seg_monitor.v VgaSyncGen.v line_buffer.v seg7_rom.v gamma.v stream_in.v
+prep -top multi_seg_monitor
+
+[files]
+../src/multi_seg_monitor.v
+../src/VgaSyncGen.v
+../src/line_buffer.v
+../src/seg7_rom.v
+../src/gamma.v
+../src/stream_in.v

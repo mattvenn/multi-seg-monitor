@@ -2,6 +2,11 @@ build/
 src/_tt_fpga_top.v
 test/sim_build/
 test/results.xml
+formal/stream_in/
+formal/lb_exclusivity/
+formal/zone_exclusivity/
+formal/vga_counter_bounds/
+formal/buf_isolation/
 test/frame.ppm
 test/frame.png
 *.vcd
