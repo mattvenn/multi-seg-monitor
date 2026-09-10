@@ -277,9 +277,10 @@ async def test_stream_frame(dut):
             sent = segments.unpack_digit(frame[off : off + 4])
             for seg in range(8):
                 x, y = segments.segment_centre(col, row, seg)
-                # The design emits grey = level[5:2], so the 6 bit gamma entry
-                # loses its bottom two bits on the way to the pmod.
-                want = segments.GAMMA[sent[seg]] >> 2
+                # The design dithers the bottom two bits rather than
+                # truncating them, so the expected 4-bit code depends on
+                # this pixel's position, not just the stored index.
+                want = segments.dither(segments.GAMMA[sent[seg]], x, y)
                 got = level_at(x, y)
                 if got != want:
                     bad.append((col, row, segments.SEGMENTS[seg][0], sent[seg], want, got))
@@ -296,6 +297,65 @@ async def test_stream_frame(dut):
     )
 
     check_gold(dut, "stream.png", width, height, px)
+
+
+@cocotb.test()
+async def test_dither_spreads_across_pixel_parity(dut):
+    """
+    One segment lit at an intensity whose gamma level has a nonzero
+    remainder must show both the floor and the ceiling 4-bit code across its
+    area, in the exact proportion the remainder calls for -- not one flat
+    (wrong) value everywhere, which is what truncation gave every pixel of a
+    segment regardless of position.
+    """
+    cocotb.start_soon(Clock(dut.clk, CLK_PS, unit="ps").start())
+    await reset(dut)
+    dut.uio_in.value = UIO_IDLE
+
+    col, row, seg = 5, 5, 1  # segment 'b', 2 px wide x 4 px tall -- room for
+    # all four (x parity, y parity) combinations inside one segment.
+    idx = 4  # GAMMA[4] = 35 = 8*4 + 3, a nonzero remainder to dither.
+
+    data = bytearray()
+    for r in range(segments.ROWS):
+        for c in range(segments.COLS):
+            intensities = [0] * 8
+            if (c, r) == (col, row):
+                intensities[seg] = idx
+            data += segments.pack_digit(intensities)
+    frame = bytes(data)
+    assert len(frame) == segments.FRAME_BYTES
+
+    cocotb.start_soon(host_stream(dut, frame, frames=7))
+
+    await ClockCycles(dut.clk, 2 * H_TOTAL * V_TOTAL)
+    dut.dump_en.value = 1
+    await ClockCycles(dut.clk, 3 * H_TOTAL * V_TOTAL)
+
+    width, height, px = read_ppm("frame.ppm")
+
+    def level_at(x, y):
+        return px[(y * width + x) * 3] // 17
+
+    x0, x1, y0, y1 = segments.segment_pixels(col, row, seg)
+    level = segments.GAMMA[idx]
+    bad = []
+    ups = 0
+    for y in (y0, y0 + 1):
+        for x in (x0, x1):
+            want = segments.dither(level, x, y)
+            got = level_at(x, y)
+            if got != want:
+                bad.append((x, y, want, got))
+            if got == (level >> 2) + 1:
+                ups += 1
+
+    assert not bad, f"wrong dithered code at {bad}"
+    assert ups == (level & 0x3), (
+        f"{ups} of 4 sampled pixels rounded up, want {level & 0x3}"
+    )
+
+    dut._log.info("dither ok: %d of 4 pixels rounded up, matching remainder", ups)
 
 
 # --------------------------------------------------------------------------
@@ -364,11 +424,10 @@ def analyse(px, width, frame):
     caught up with the host on that row.
     """
 
-    def want(col, row, seg):
+    def want(col, row, seg, x, y):
         off = segments.digit_offset(col, row)
-        # The design emits grey = level[5:2], so the 6 bit gamma entry loses its
-        # bottom two bits on the way to the pmod.
-        return segments.GAMMA[segments.unpack_digit(frame[off : off + 4])[seg]] >> 2
+        idx = segments.unpack_digit(frame[off : off + 4])[seg]
+        return segments.dither(segments.GAMMA[idx], x, y)
 
     wrong = stale = 0
     first_bad = {}
@@ -377,10 +436,10 @@ def analyse(px, width, frame):
             for seg in range(8):
                 x, y = segments.segment_centre(col, row, seg)
                 got = px[(y * width + x) * 3] // 17
-                if got == want(col, row, seg):
+                if got == want(col, row, seg, x, y):
                     continue
                 wrong += 1
-                if row >= 4 and got == want(col, row - 4, seg):
+                if row >= 4 and got == want(col, row - 4, seg, x, y):
                     stale += 1
                 if row not in first_bad:
                     first_bad[row] = col

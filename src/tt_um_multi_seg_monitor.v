@@ -12,6 +12,7 @@ module tt_um_multi_seg_monitor (
 
     wire [5:0] level;
     wire hsync, vsync;
+    wire px_x_lsb, px_y_lsb;
 
     // Prototype output: Digilent PmodVGA (4 bits/channel), spanning uo_out and the
     // low 6 bits of uio -- R/B on uo_out, G/HS/VS on uio, matching how the board's
@@ -28,7 +29,29 @@ module tt_um_multi_seg_monitor (
     // PmodVGA leaves those two not-connected, which is what freed them up for
     // this. uio[5:0] are now outputs (video), uio[7:6] stay inputs (stream
     // control), so uio_oe is no longer all-input.
-    wire [3:0] grey = level[5:2];
+    //
+    // The bottom two bits of level are dithered into the 4-bit code rather than
+    // discarded: hardware bring-up (2026-09-10) showed the plain top-4-bits
+    // truncation left the bright end of the range visually flat even where the
+    // 6-bit gamma table has genuine distinct values. A 2x2 ordered (Bayer)
+    // dither spreads that fraction across space instead -- exactly `rem` of
+    // every 4 pixels (one period of x and y parity) round up to base+1, the
+    // rest stay at base, so the average over a small area reproduces the true
+    // fractional brightness rather than one fixed (wrong) value everywhere.
+    // Thresholds must match tools/segments.py's DITHER_THRESHOLD/dither().
+    wire [3:0] dither_base = level[5:2];
+    wire [1:0] dither_rem  = level[1:0];
+    reg  [1:0] dither_thresh;
+    always @* begin
+        case ({px_y_lsb, px_x_lsb})
+            2'b00: dither_thresh = 2'd0;
+            2'b01: dither_thresh = 2'd2;
+            2'b10: dither_thresh = 2'd3;
+            2'b11: dither_thresh = 2'd1;
+        endcase
+    end
+    wire [3:0] grey = (dither_rem > dither_thresh && dither_base != 4'hF)
+        ? dither_base + 4'd1 : dither_base;
 
     assign uo_out[3:0] = grey;  // R0-R3
     assign uo_out[7:4] = grey;  // B0-B3
@@ -49,7 +72,9 @@ module tt_um_multi_seg_monitor (
         .stream_mode (uio_in[7]),
         .hsync       (hsync),
         .vsync       (vsync),
-        .level       (level)
+        .level       (level),
+        .px_x_lsb    (px_x_lsb),
+        .px_y_lsb    (px_y_lsb)
     );
 
     // verilator lint_off UNUSEDSIGNAL

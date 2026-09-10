@@ -18,7 +18,9 @@ module multi_seg_monitor (
     input  wire       stream_mode,  // uio[1]: 0 = internal generator, 1 = stream
     output reg        hsync,
     output reg        vsync,
-    output wire [5:0] level         // native 6 bit intensity
+    output wire [5:0] level,        // native 6 bit intensity
+    output wire       px_x_lsb,     // pixel position parity, for dithering
+    output wire       px_y_lsb      // level's bottom 2 bits in the wrapper
     );
 
     // Grid geometry, fixed at synthesis (SPEC.md section 1).
@@ -313,6 +315,16 @@ module multi_seg_monitor (
         hsync <= vga_hsync;
         vsync <= vga_vsync;
     end
+
+    // Deliberately NOT delayed like hsync/vsync above: those track the raw
+    // x_px pipeline stage that gates blanking, but the pixel a dithered code
+    // actually lands on this cycle is whatever x_px/y_px says right now --
+    // seg_idx/cur_digit settle from cx/cy well within a cell, so there's no
+    // extra register stage to match here. Registering these by one cycle to
+    // mirror hsync/vsync looked like the safe default but was measurably
+    // wrong: it swapped which of a segment's pixels rounded up vs down.
+    assign px_x_lsb = x_px[0];
+    assign px_y_lsb = y_px[0];
 
 `ifdef FORMAL
     // `read_verilog -formal` (see formal/) defines FORMAL in place of

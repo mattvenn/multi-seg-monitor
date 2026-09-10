@@ -33,13 +33,36 @@ SEGMENTS = [
     ("DP", 10, 10, 12, 13),
 ]
 
-# Only the top 4 bits (level[5:2] in tt_um_multi_seg_monitor.v) ever reach the
-# panel, so each entry is round((i/15) ** (1/2.2) * 15) scaled back up by 4 --
-# not round((i/15) ** (1/2.2) * 63) independently rounded at 6-bit precision and
-# then truncated, which double-rounds and silently loses extra levels on top of
-# the ones the gamma curve's own compression at the bright end already costs.
-# Must match src/gamma.v.
-GAMMA = [0, 16, 24, 28, 32, 36, 40, 44, 44, 48, 48, 52, 56, 56, 60, 60]
+# round((i/15) ** (1/2.2) * 63) at true 6-bit precision. Only the top 4 bits
+# (level[5:2]) reach PmodVGA, but the bottom 2 are no longer thrown away --
+# tt_um_multi_seg_monitor.v dithers them instead of truncating, so keeping
+# the full 6-bit value here (rather than pre-rounding to 4-bit and scaling)
+# is what gives dithering a real fraction to spread out. Must match
+# src/gamma.v.
+GAMMA = [0, 18, 25, 30, 35, 38, 42, 45, 47, 50, 52, 55, 57, 59, 61, 63]
+
+# 2x2 ordered (Bayer) dither: for a 6-bit level with base = level>>2 and
+# remainder = level & 3, exactly `remainder` of every 4 pixels (one full
+# period of x and y parity) round up to base+1, the rest stay at base. The
+# thresholds are placed so each of the 4 (y_parity, x_parity) phases picks a
+# distinct rank, which is what makes the fraction come out exact rather than
+# approximate. Must match the dither block in tt_um_multi_seg_monitor.v.
+DITHER_THRESHOLD = {
+    (0, 0): 0,
+    (0, 1): 2,
+    (1, 0): 3,
+    (1, 1): 1,
+}
+
+
+def dither(level, x, y):
+    """4-bit PmodVGA code for a 6-bit gamma level, dithered at pixel (x, y)."""
+    base = level >> 2
+    rem = level & 0x3
+    thresh = DITHER_THRESHOLD[(y & 1, x & 1)]
+    if rem > thresh and base != 0xF:
+        return base + 1
+    return base
 
 
 def pack_digit(intensities):

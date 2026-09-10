@@ -168,6 +168,7 @@ class Player:
 
 
 def main(path="video.seg", video_fps=24.0):
+#def main(path="testcard.seg", video_fps=24.0):
     from ttboard.demoboard import DemoBoard
     import ttboard.fpga.fabricfoxv2 as fpgaloader
 
