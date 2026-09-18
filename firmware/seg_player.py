@@ -32,20 +32,26 @@ dispatches from the interrupt itself and cuts that to ~80 us, comfortably
 inside budget.
 """
 
+import time
+
 import rp2
 from machine import Pin
 
 # Demoboard GPIO map, from the tt-demo-pcb README.  ui_in is contiguous on
 # GPIO17-24, which is what lets the whole byte leave in a single PIO `out`.
 #
-# PmodVGA prototype pinout: uio[5:0] carry video out to the pmod (G/HS/VS),
-# which is why strobe/mode moved off uio[0:1] onto uio[6:7] -- PmodVGA's
-# second connector leaves those two not-connected. vsync moved from
-# uo_out[3] (Tiny VGA) to uio[5] to match. See src/tt_um_multi_seg_monitor.v.
+# strobe/mode-select sit on uio[6:7] in both Pmod modes -- Tiny VGA touches
+# no uio pin at all, so there's nothing to relocate them for (see
+# src/tt_um_multi_seg_monitor.v). vsync does move, though: uio[5] on
+# Digilent PmodVGA, uo_out[3] on Tiny VGA -- _on_vsync's IRQ pin has to
+# follow pmod_type or it listens on a pin the chip isn't driving in that
+# mode, which is exactly what desynced the DMA and broke streaming under
+# Tiny VGA before this was fixed.
 DATA_BASE = 17  # ui_in[0..7]  -> GPIO17..24
 STROBE = 31  # uio[6]       -> stream strobe
 MODE = 32  # uio[7]       -> 1 selects streamed data
-VSYNC = 30  # uio[5]       -> PmodVGA vsync
+VSYNC_DIGILENT = 30  # uio[5]   -> Digilent PmodVGA vsync
+VSYNC_TINYVGA = 36  # uo_out[3] -> Tiny VGA vsync
 
 # Display constants -- must match
 # docs/superpowers/specs/2026-08-11-800x600-mode-design.md
@@ -78,7 +84,7 @@ def push_bytes():
 
 
 class Player:
-    def __init__(self, path, video_fps, pixel_hz):
+    def __init__(self, path, video_fps, pixel_hz, pmod_type=0):
         self.file = open(path, "rb")
         self.file.seek(0, 2)
         self.frames = self.file.tell() // FRAME_BYTES
@@ -124,7 +130,8 @@ class Player:
         )
 
         self.sm.active(1)
-        Pin(VSYNC, Pin.IN).irq(
+        vsync = VSYNC_TINYVGA if pmod_type else VSYNC_DIGILENT
+        Pin(vsync, Pin.IN).irq(
             trigger=Pin.IRQ_FALLING, handler=self._on_vsync, hard=True
         )
 
@@ -167,7 +174,13 @@ class Player:
         self.file.close()
 
 
-def main(path="video.seg", video_fps=24.0):
+def main(path="video.seg", video_fps=24.0, pmod_type=1, palette=0):
+    """
+    `pmod_type`/`palette` pick the reset-time strap: pmod_type 0=Digilent
+    PmodVGA (default), 1=Tiny VGA; palette 0-3 selects one of
+    src/palette.v's colour palettes, applied in either mode. See
+    src/tt_um_multi_seg_monitor.v.
+    """
     from ttboard.demoboard import DemoBoard
     import ttboard.fpga.fabricfoxv2 as fpgaloader
 
@@ -183,7 +196,22 @@ def main(path="video.seg", video_fps=24.0):
     pwm = tt.clock_project_PWM(PIXEL_HZ)
     pixel_hz = pwm.freq()  # actually achieved, may differ from PIXEL_HZ
 
-    player = Player(path, video_fps, pixel_hz)
+    # The strap register (src/tt_um_multi_seg_monitor.v) only samples
+    # ui_in[2:0] while rst_n is low, so this has to come after the clock
+    # starts and pulse reset itself, and before the Player below starts
+    # pushing bytes -- pulsing rst_n also resets the core's write pointer,
+    # and doing that once a stream is already running would desync the host
+    # from the raster, the same class of corruption the delay-sweep tests
+    # exist to catch. Inlined rather than imported from select_mode.py:
+    # `mpremote run` execs one file with no access to a sibling module.
+    strap = (palette << 1) | pmod_type
+    for i in range(3):
+        Pin(DATA_BASE + i, Pin.OUT, value=(strap >> i) & 1)
+    tt.reset_project(True)
+    time.sleep_ms(1)  # comfortably more than one 40 MHz clock edge
+    tt.reset_project(False)
+
+    player = Player(path, video_fps, pixel_hz, pmod_type)
     try:
         while True:
             player.service()

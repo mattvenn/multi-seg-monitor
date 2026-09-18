@@ -17,6 +17,7 @@ WRAPPER    = $(TT_TOOLS)/fpga/tt_fpga_top.v
 
 SOURCES  = src/tt_um_multi_seg_monitor.v \
            src/multi_seg_monitor.v \
+           src/palette.v \
            src/VgaSyncGen.v \
            src/line_buffer.v \
            src/seg7_rom.v \

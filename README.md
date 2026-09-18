@@ -18,13 +18,17 @@ reasoning behind it, and [resolution_discussion.md](resolution_discussion.md) se
 # Controls
 
 * Data to display
-* Levels of brightness — 4 bits per segment, sent to the DAC directly: 16 stored
-  levels, 16 distinct output codes, no gamma stage (a 4-bit DAC can't fit a
-  non-trivial gamma curve and still keep all 16 distinct -- see the comment
-  above `grey` in `src/multi_seg_monitor.v`)
-* Colour — set by a jumper on the output PMOD, not at runtime. Six output pins cannot
-  carry both fine gradation and per-pixel colour, and every display this imitates is
-  single colour anyway.
+* Levels of brightness — 4 bits per segment, sent through a colour palette (see
+  below) rather than a single-channel gamma stage: a 4-bit DAC can't fit a
+  non-trivial *single-channel* curve and still keep all 16 stored levels distinct
+  (pigeonhole -- see the comment in `src/palette.v`), which is why palette 0
+  reproduces the old direct-to-DAC mapping exactly rather than warping it.
+* Colour — a reset-time strap, not a runtime or per-pixel control. At reset,
+  `ui_in[0]` picks the physical Pmod (Digilent PmodVGA's 4 bits/channel, or the
+  classic Tiny Tapeout VGA Pmod's 2 bits/channel) and `ui_in[2:1]` picks one of 4
+  preset colour palettes (`src/palette.v`) applied to every segment alike — still
+  a whole-display choice, not per-segment colour, since every display this
+  imitates is single colour anyway. See "Reset-time config strap" below.
 
 # Status
 
@@ -113,12 +117,27 @@ the notes below are what that cost rather than what was expected to.
 missing `klayout` and `chevron` on the machine this was written on —
 `pip install -r requirements.txt` in that repo.
 
-The prototype output is a **Digilent PmodVGA** across both output headers: R on
+The default output is a **Digilent PmodVGA** across both output headers: R on
 `uo_out[3:0]`, B on `uo_out[7:4]`, G on `uio[3:0]`, hsync on `uio[4]` and vsync on
-`uio[5]`. The stored 4-bit intensity is replicated across all three channels as-is
-(no gamma stage), so the picture is grey at 16 levels, matching the DAC exactly.
-Strobe and mode select sit on `uio[6]` and `uio[7]`, which is where PmodVGA leaves
-two pins not connected.
+`uio[5]`. Strobe and mode select sit on `uio[6]` and `uio[7]`, which is where
+PmodVGA leaves two pins not connected.
+
+### Reset-time config strap
+
+`ui_in[2:0]` is sampled once, held for the whole reset pulse, then reverts to
+ordinary stream data for the rest of the chip's life:
+
+| Bit | Meaning |
+|---|---|
+| `ui_in[0]` | 0 = Digilent PmodVGA (default), 1 = classic Tiny Tapeout VGA Pmod |
+| `ui_in[2:1]` | which of `src/palette.v`'s 4 colour palettes (0 = today's plain grey) |
+
+The host must hold its chosen value on these bits for the entire reset pulse,
+not just assert it once — the strap register re-samples every cycle `rst_n`
+is low, so the *last* value before it rises is what sticks. Tiny VGA mode
+only uses `uo_out` (2 bits/channel); `uio[0:5]` go unused and `uio_oe` goes
+all-input in that mode, `uio[6:7]` (strobe/mode select) stay exactly where
+they are in both modes. See `src/tt_um_multi_seg_monitor.v` and `src/palette.v`.
 
 **1. Internal generator, no firmware.** Leave `uio[7]` low and the design ignores the
 stream port entirely. You should get a 64x37 grid of hex digits scrolling diagonally

@@ -14,6 +14,7 @@ ifneq ($(GATES),yes)
 SIM_BUILD = sim_build/rtl
 VERILOG_SOURCES += $(SRC_DIR)/tt_um_multi_seg_monitor.v
 VERILOG_SOURCES += $(SRC_DIR)/multi_seg_monitor.v
+VERILOG_SOURCES += $(SRC_DIR)/palette.v
 VERILOG_SOURCES += $(SRC_DIR)/VgaSyncGen.v
 VERILOG_SOURCES += $(SRC_DIR)/line_buffer.v
 VERILOG_SOURCES += $(SRC_DIR)/seg7_rom.v
@@ -87,7 +88,7 @@ delay-sweep: testcard.seg
 gold: testcard.seg
 	rm -f results.xml
 	GOLD_UPDATE=1 DELAY_SWEEP=1 \
-	    COCOTB_TEST_FILTER='"test_render_frame|test_stream_frame|test_stream_delay_0000us"' \
+	    COCOTB_TEST_FILTER='"test_render_frame$$|test_render_frame_tiny_vga|test_render_frame_palette2|test_stream_frame|test_stream_delay_0000us"' \
 	    $(MAKE)
 
 # testcard.seg is committed, so this only fires if it has been deleted.  The

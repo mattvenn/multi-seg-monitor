@@ -38,9 +38,13 @@ MARGIN_Y = 4
 # into px_r/px_g/px_b, so use those rather than masking by hand.
 
 
-async def reset(dut):
+async def reset(dut, strap=0):
+    """`strap` is sampled onto ui_in[2:0] for the whole reset pulse and
+    latched as (pmod_type, palette_sel) -- see src/tt_um_multi_seg_monitor.v.
+    Default 0 selects Digilent PmodVGA + palette 0, today's behaviour, so
+    every existing call site is unaffected unless it opts in."""
     dut.ena.value = 1
-    dut.ui_in.value = 0
+    dut.ui_in.value = strap & 0x7
     dut.uio_in.value = 0
     dut.dump_en.value = 0
     dut.rst_n.value = 0
@@ -303,6 +307,169 @@ async def test_stream_frame(dut):
     )
 
     check_gold(dut, "stream.png", width, height, px)
+
+
+# --------------------------------------------------------------------------
+# Reset-time config strap: Pmod select + colour palette
+#
+# ui_in[2:0] is sampled every cycle rst_n is low and latched as
+# (pmod_type, palette_sel) once it rises -- see
+# src/tt_um_multi_seg_monitor.v. Strap 0 (Digilent + palette 0) is exercised
+# implicitly by every test above via reset()'s default.
+# --------------------------------------------------------------------------
+
+
+@cocotb.test()
+async def test_render_frame_tiny_vga(dut):
+    """Same capture as test_render_frame, strapped into Tiny VGA + palette 0
+    -- isolates the pin-mapping/truncation change from the palette-colour
+    change below. Not the full property battery test_render_frame runs
+    (margins/corners/etc. don't depend on which Pmod is selected), just a
+    gold-image sanity check that the new capture path in tb.v is wired
+    correctly."""
+    cocotb.start_soon(Clock(dut.clk, CLK_PS, unit="ps").start())
+    await reset(dut, strap=0b001)  # Tiny VGA, palette 0
+
+    await ClockCycles(dut.clk, 2 * H_TOTAL * V_TOTAL)
+    dut.dump_en.value = 1
+    await ClockCycles(dut.clk, 3 * H_TOTAL * V_TOTAL)
+
+    width, height, px = read_ppm("frame.ppm")
+    assert (width, height) == (H_ACTIVE, V_ACTIVE)
+    lit = sum(1 for i in range(0, len(px), 3) if px[i : i + 3] != [0, 0, 0])
+    assert lit, "nothing rendered in Tiny VGA mode"
+
+    check_gold(dut, "generator_tinyvga.png", width, height, px)
+
+
+@cocotb.test()
+async def test_render_frame_palette2(dut):
+    """Same capture as test_render_frame, strapped into Digilent + palette 2
+    -- isolates the colour-palette change (Digilent's pin mapping and
+    truncation are unaffected by palette choice)."""
+    cocotb.start_soon(Clock(dut.clk, CLK_PS, unit="ps").start())
+    await reset(dut, strap=0b100)  # Digilent, palette 2
+
+    await ClockCycles(dut.clk, 2 * H_TOTAL * V_TOTAL)
+    dut.dump_en.value = 1
+    await ClockCycles(dut.clk, 3 * H_TOTAL * V_TOTAL)
+
+    width, height, px = read_ppm("frame.ppm")
+    assert (width, height) == (H_ACTIVE, V_ACTIVE)
+    # Palette 2 is not r=g=b, so a coloured (non-grey) pixel somewhere is the
+    # cheapest sign the palette actually took effect rather than defaulting.
+    coloured = any(
+        px[i] != px[i + 1] or px[i + 1] != px[i + 2] for i in range(0, len(px), 3)
+    )
+    assert coloured, "no non-grey pixel found -- palette 2 doesn't look selected"
+
+    check_gold(dut, "generator_palette2.png", width, height, px)
+
+
+@cocotb.test()
+async def test_palette_matches_python_table(dut):
+    """src/palette.v must match tools/segments.py's PALETTES entry-for-entry
+    -- the anti-transcription-drift check for the hand-translated RTL case
+    statement. If this holds, palette.v inherits PALETTES' own invariants
+    (verified separately, in Python, by tools/test_palettes.py) for free."""
+    cocotb.start_soon(Clock(dut.clk, CLK_PS, unit="ps").start())
+    await reset(dut)
+
+    bad = []
+    for sel in range(4):
+        for idx in range(16):
+            dut.dbg_pal_sel.value = sel
+            dut.dbg_pal_idx.value = idx
+            await Timer(1, unit="ns")
+            got = (int(dut.dbg_pal_r.value), int(dut.dbg_pal_g.value), int(dut.dbg_pal_b.value))
+            want = segments.PALETTES[sel][idx]
+            if got != want:
+                bad.append((sel, idx, want, got))
+
+    assert not bad, f"{len(bad)} of 64 palette entries mismatch RTL vs Python, first few: {bad[:5]}"
+    dut._log.info("all 4 palettes match tools/segments.py exactly")
+
+
+@cocotb.test()
+async def test_strap_latches_last_value_before_reset_rises(dut):
+    """The strap register re-samples every cycle rst_n is low, so the value
+    it holds is whatever ui_in showed on the last low cycle, not the first --
+    easy to get backwards, so pin it down explicitly."""
+    cocotb.start_soon(Clock(dut.clk, CLK_PS, unit="ps").start())
+
+    dut.ena.value = 1
+    dut.uio_in.value = 0
+    dut.dump_en.value = 0
+    dut.rst_n.value = 0
+
+    dut.ui_in.value = 0b111  # Tiny VGA, palette 3 -- would be wrong if it stuck
+    await ClockCycles(dut.clk, 5)
+    dut.ui_in.value = 0b010  # Digilent, palette 1 -- this is the one that should stick
+    await ClockCycles(dut.clk, 5)
+
+    dut.rst_n.value = 1
+    await ClockCycles(dut.clk, 1)
+
+    assert int(dut.user_project.pmod_type.value) == 0
+    assert int(dut.user_project.palette_sel.value) == 1
+
+
+@cocotb.test()
+async def test_tiny_vga_pin_mapping(dut):
+    """Tiny VGA mode's uo_out is a pure combinational function of the core's
+    r/g/b/hsync/vsync, reconstructed from this repo's first commit (d7fee74):
+    uo_out[7:0] = {hsync, b[2], g[2], r[2], vsync, b[3], g[3], r[3]}. True
+    every cycle regardless of picture content, so this doesn't need to target
+    any particular pixel -- just sample across reset and a few hundred
+    cycles of the internal generator running."""
+    cocotb.start_soon(Clock(dut.clk, CLK_PS, unit="ps").start())
+    await reset(dut, strap=0b001)  # Tiny VGA, palette 0
+
+    assert int(dut.uio_oe.value) == 0, "uio must be all-input in Tiny VGA mode"
+    assert int(dut.uio_out.value) == 0
+
+    for _ in range(300):
+        await RisingEdge(dut.clk)
+        r = int(dut.user_project.r.value)
+        g = int(dut.user_project.g.value)
+        b = int(dut.user_project.b.value)
+        hsync = int(dut.user_project.hsync.value)
+        vsync = int(dut.user_project.vsync.value)
+        want = (
+            (hsync << 7)
+            | (((b >> 2) & 1) << 6)
+            | (((g >> 2) & 1) << 5)
+            | (((r >> 2) & 1) << 4)
+            | (vsync << 3)
+            | (((b >> 3) & 1) << 2)
+            | (((g >> 3) & 1) << 1)
+            | ((r >> 3) & 1)
+        )
+        got = int(dut.uo_out.value)
+        assert got == want, f"uo_out={got:#04x}, want {want:#04x} (r={r:x} g={g:x} b={b:x})"
+
+    dut._log.info("Tiny VGA pin mapping holds across 300 cycles")
+
+
+@cocotb.test()
+async def test_strap_does_not_couple_to_stream_data_after_reset(dut):
+    """Once rst_n rises, ui_in[2:0] reverts to ordinary stream-data bits --
+    the latched pmod_type/palette_sel must never move again, no matter what
+    the host subsequently drives on ui_in."""
+    cocotb.start_soon(Clock(dut.clk, CLK_PS, unit="ps").start())
+    await reset(dut, strap=0b101)  # Tiny VGA, palette 2
+
+    want_pmod, want_pal = 1, 2
+    assert int(dut.user_project.pmod_type.value) == want_pmod
+    assert int(dut.user_project.palette_sel.value) == want_pal
+
+    for value in range(8):
+        dut.ui_in.value = value
+        await ClockCycles(dut.clk, 3)
+        assert int(dut.user_project.pmod_type.value) == want_pmod
+        assert int(dut.user_project.palette_sel.value) == want_pal
+
+    dut._log.info("strap immune to post-reset ui_in changes")
 
 
 # --------------------------------------------------------------------------

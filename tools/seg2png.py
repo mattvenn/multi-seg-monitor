@@ -6,11 +6,14 @@ A software model of the renderer, for judging framing and brightness without a
 monitor or a simulation:
 
     ./seg2png.py clip.seg preview.png --frame 30
-    ./seg2png.py clip.seg preview.png --levels 4    # as the Tiny VGA prototype
+    ./seg2png.py clip.seg preview.png --levels 4              # Tiny VGA Pmod
+    ./seg2png.py clip.seg preview.png --palette 2 --levels 4  # Tiny VGA, palette 2
 
---levels 4 truncates to the 2 bits per channel the prototype pmod carries, which
-is worth looking at before assuming a clip will survive the FPGA bring-up: 4
-levels is a long way from 16.
+--levels 4 truncates each channel to the top 2 bits Tiny VGA mode carries,
+worth looking at before assuming a clip reads well there: --palette 0 (the
+default, today's grey) only has 4 distinguishable levels once truncated, by
+design (src/palette.v) -- palettes 1-3 stay 16-way distinct even at 4 levels
+by spending hue instead of just brightness.
 """
 
 import argparse
@@ -21,28 +24,31 @@ import segments
 WIDTH, HEIGHT = 800, 600
 
 
-def render(frame, levels):
+def render(frame, levels, palette=0):
     px = bytearray(WIDTH * HEIGHT * 3)
     for row in range(segments.ROWS):
         for col in range(segments.COLS):
             off = segments.digit_offset(col, row)
             intensity = segments.unpack_digit(frame[off : off + 4])
             for seg in range(8):
-                code = intensity[seg]  # sent straight to the DAC -- no gamma stage
+                code = intensity[seg]
+                r, g, b = segments.PALETTES[palette][code]  # no gamma stage
                 if levels == 4:
-                    # The prototype keeps the top 2 bits, so rescale to match.
-                    value = (code >> 2) * 85
+                    # Tiny VGA keeps each channel's top 2 bits -- truncate the
+                    # looked-up colour, not the pre-lookup intensity index;
+                    # these only coincide for palette 0's identity mapping.
+                    r, g, b = (r >> 2) * 85, (g >> 2) * 85, (b >> 2) * 85
                 else:
-                    value = code * 17  # 0-15 -> 0-255, exact (15*17 == 255)
-                if not value:
+                    r, g, b = r * 17, g * 17, b * 17  # 0-15 -> 0-255, exact
+                if not (r or g or b):
                     continue
                 x0, x1, y0, y1 = segments.segment_pixels(col, row, seg)
                 for y in range(y0, y1 + 1):
                     base = (y * WIDTH + x0) * 3
                     for i in range(0, (x1 - x0 + 1) * 3, 3):
-                        px[base + i] = value
-                        px[base + i + 1] = value
-                        px[base + i + 2] = value
+                        px[base + i] = r
+                        px[base + i + 1] = g
+                        px[base + i + 2] = b
     return px
 
 
@@ -56,7 +62,14 @@ def main():
         type=int,
         default=16,
         choices=(4, 16),
-        help="16 for the direct 4-bit output, 4 for the Tiny VGA prototype",
+        help="16 for the direct 4-bit Digilent output, 4 for Tiny VGA",
+    )
+    ap.add_argument(
+        "--palette",
+        type=int,
+        default=0,
+        choices=(0, 1, 2, 3),
+        help="which of src/palette.v's 4 palettes (0 = today's grey)",
     )
     args = ap.parse_args()
 
@@ -66,7 +79,7 @@ def main():
     if len(frame) < segments.FRAME_BYTES:
         raise SystemExit(f"frame {args.frame} is past the end of {args.input}")
 
-    png.write_png(args.output, WIDTH, HEIGHT, render(frame, args.levels))
+    png.write_png(args.output, WIDTH, HEIGHT, render(frame, args.levels, args.palette))
     print(f"wrote {args.output}")
 
 

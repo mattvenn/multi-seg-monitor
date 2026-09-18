@@ -116,8 +116,14 @@ low-to-high as `a, b, c, d, e, f, g, DP` — host software depends on it.
 
 ### Pinout
 
-Prototype output is a **Digilent PmodVGA across both headers**, so video spans
-`uo_out` *and* `uio`:
+Output mode is chosen at reset, not fixed: a config strap on `ui_in[2:0]`,
+sampled every cycle `rst_n` is low and latched once it rises, then reverting
+to plain stream data. `ui_in[0]` picks the physical Pmod, `ui_in[2:1]` pick
+one of `src/palette.v`'s 4 colour palettes (applied in both modes). This is
+the RTL's first reset-time-only pin sample — everything else is read
+continuously.
+
+**Digilent PmodVGA** (`ui_in[0]=0`, default), video spans `uo_out` *and* `uio`:
 
 | | |
 |---|---|
@@ -125,11 +131,23 @@ Prototype output is a **Digilent PmodVGA across both headers**, so video spans
 | `uio[3:0]` | G nibble |
 | `uio[4]` / `uio[5]` | hsync / vsync |
 | `uio[6]` / `uio[7]` | stream strobe / mode select |
-| `ui_in[7:0]` | stream data |
+| `ui_in[7:0]` | stream data (bits 2:0 double as the reset strap) |
 
-`uio_oe` is `8'b0011_1111`. `SPEC.md` section 7 still describes the earlier Tiny VGA
-prototype and the native 6-bit custom Pmod; **the RTL, `info.yaml`, `tb.v` and
-`firmware/seg_player.py` are the truth.** Moving these pins breaks all four at once.
+`uio_oe` is `8'b0011_1111`.
+
+**Tiny Tapeout VGA Pmod** (`ui_in[0]=1`), this chip's original output mode in
+its very first commit, resurrected rather than designed fresh — video is
+`uo_out` only (2 bits/channel, each core channel's top 2 bits), `uio[0:5]`
+unused and `uio_oe` goes fully input in this mode. `uio[6]`/`uio[7]` are the
+*same* pins as Digilent mode — Tiny VGA touches no `uio` pin at all, so
+there's nothing to relocate and `firmware/seg_player.py`'s GPIO map doesn't
+fork on the strap. Bit order reconstructed from commit `d7fee74`: `uo_out[7:0]
+= {hsync, B0, G0, R0, vsync, B1, G1, R1}`.
+
+`SPEC.md` section 7 still describes the pre-strap single-Pmod design and the
+native 6-bit custom Pmod idea (never built); **the RTL, `info.yaml`, `tb.v`
+and `firmware/seg_player.py` are the truth.** Moving these pins, or the
+strap's bit assignment, breaks all four at once.
 
 ## Testing approach
 

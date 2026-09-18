@@ -16,6 +16,19 @@ and rendered by racing the beam — the chip holds no frame.
 > summary. This page is kept as-is rather than rewritten so it stays a true
 > record of the original design discussion.
 
+> **2026-09-18: output Pmod and colour are both now a reset-time strap, not
+> a fixed prototype/native split.** Section 5.1's "colour is a build-time
+> jumper" and section 7's "Native mode" / "Prototype mode" pin tables
+> describe a design that was never built this way — what shipped is a
+> single Digilent PmodVGA layout, and colour was a grey-only DAC pass
+> through. This is now superseded by `ui_in[2:0]`, sampled once at reset:
+> bit 0 picks Digilent PmodVGA or the classic Tiny Tapeout VGA Pmod (section
+> 7's "Prototype mode" pinout, reconstructed rather than section 7's numbers)
+> and bits 2:1 pick one of 4 colour palettes (`src/palette.v`) applied in
+> either mode. See `README.md`'s "Reset-time config strap" and
+> `CLAUDE.md`'s "Pinout" for the current pin assignment and palette scheme.
+> This page is kept as-is per the note above, not rewritten.
+
 ---
 
 ## 1. Display geometry
