@@ -43,6 +43,16 @@ on hardware, driven from the demoboard — steps 1 and 2 of [Bring-up](#bring-up
 which is also where what that run cost is written down. Full rate video, step 3, has
 not been run.
 
+**All 16 grey levels confirmed distinguishable on hardware.** A gamma curve here
+can't both warp the perceptual response and keep 16 stored levels mapped to 16
+distinct DAC codes -- a 4-bit output only has 16 codes to begin with, so any
+non-trivial curve is forced to collide two of them (indices 14 and 15 did,
+exactly, before this was found). Removing the curve and sending the stored
+intensity straight to the DAC was confirmed on real hardware, not just in
+simulation -- see the comment above `grey` in `src/multi_seg_monitor.v` and
+`dithering_investigation.md` on the `gamma-dithering` branch for the investigation
+that found it.
+
 **The vsync tearing is fixed.** `firmware/seg_player.py` takes the vsync interrupt
 with `hard=True`, which puts the DMA restart about 80 µs after the edge against a
 budget of roughly 450 µs. Measured on a scope, not inferred — see
