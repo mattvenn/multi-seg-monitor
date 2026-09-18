@@ -18,6 +18,15 @@ BYTES_PER_DIGIT = 4
 ROW_BYTES = COLS * BYTES_PER_DIGIT  # 256 -- the line buffer's wall
 FRAME_BYTES = ROWS * ROW_BYTES  # 9472
 
+# Each stored 4-bit intensity is sent to the DAC unchanged -- there used to be a
+# gamma LUT here (src/gamma.v, removed), but the PmodVGA output is a hard 4-bit
+# DAC: 16 codes in, 16 codes out. Any monotonic curve that reshapes 16 values
+# into 16 values is forced by pigeonhole into being the identity, so a
+# non-trivial curve can only ever collide two stored indices onto the same
+# code -- which is what made indices 14 and 15 genuinely indistinguishable on
+# hardware, dithering or not. See dithering_investigation.md on the
+# gamma-dithering branch for the investigation this came out of.
+
 # Segment rectangles within a cell, as (name, x0, x1, y0, y1) inclusive.
 # Index order is the nibble order of a digit word: a, b, c, d, e, f, g, DP.
 # The digit body is 10x14; column 11 and rows 14-15 are the gaps that keep
@@ -32,15 +41,6 @@ SEGMENTS = [
     ("g", 2, 7, 6, 7),
     ("DP", 10, 10, 12, 13),
 ]
-
-# Only the top 4 bits (level[5:2] in tt_um_multi_seg_monitor.v) ever reach the
-# panel, so each entry is round((i/15) ** (1/2.2) * 15) scaled back up by 4 --
-# not round((i/15) ** (1/2.2) * 63) independently rounded at 6-bit precision and
-# then truncated, which double-rounds and silently loses extra levels on top of
-# the ones the gamma curve's own compression at the bright end already costs.
-# Must match src/gamma.v.
-GAMMA = [0, 16, 24, 28, 32, 36, 40, 44, 44, 48, 48, 52, 56, 56, 60, 60]
-
 
 def pack_digit(intensities):
     """Eight 4-bit segment intensities -> 4 bytes, low nibble first."""

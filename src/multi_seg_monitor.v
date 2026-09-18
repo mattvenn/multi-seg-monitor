@@ -18,7 +18,7 @@ module multi_seg_monitor (
     input  wire       stream_mode,  // uio[1]: 0 = internal generator, 1 = stream
     output reg        hsync,
     output reg        vsync,
-    output wire [5:0] level         // native 6 bit intensity
+    output wire [3:0] grey           // DAC code -- the stored intensity, unmodified (see below)
     );
 
     // Grid geometry, fixed at synthesis (SPEC.md section 1).
@@ -206,8 +206,13 @@ module multi_seg_monitor (
 
     // Decimal point on every eighth digit, so segment 7 is exercised too.
     wire [7:0] gen_mask = {gen_col[2:0] == 3'b000, gen_segs};
-    // Brightness bands across the row.  Never zero, so no digit vanishes.
-    wire [3:0] gen_int  = gen_col[3:0] | 4'h1;
+    // Brightness bands across the row.  Never zero, so no digit vanishes --
+    // but still cycles through every code 1-15, not just odd ones: |4'h1 was
+    // a cheap way to avoid zero that happened to throw away every even code
+    // too, which is what made the generator (the only way to see the design
+    // with no host attached) unable to show the top half of the DAC's range.
+    // See dithering_investigation.md on the gamma-dithering branch.
+    wire [3:0] gen_int  = (gen_col[3:0] == 4'h0) ? 4'hF : gen_col[3:0];
 
     wire [2:0] seg_lo = {gen_byte, 1'b0};
     wire [2:0] seg_hi = {gen_byte, 1'b1};
@@ -298,16 +303,21 @@ module multi_seg_monitor (
         endcase
     end
 
-    wire [3:0] seg_int   = cur_digit[{seg_idx, 2'b00} +: 4];
-    wire       visible   = seg_hit && cell_x && cell_y;
-    wire [3:0] gamma_idx = visible ? seg_int : 4'h0;
+    wire [3:0] seg_int = cur_digit[{seg_idx, 2'b00} +: 4];
+    wire       visible = seg_hit && cell_x && cell_y;
 
-    gamma gamma_lut (
-        .idx   (gamma_idx),
-        .level (level)
-    );
+    // No gamma curve: the PmodVGA output is a hard 4-bit DAC, 16 codes in and
+    // 16 codes out, so any monotonic remapping of 16 stored indices onto 16
+    // codes is forced by pigeonhole into being the identity -- a non-trivial
+    // curve can only collide two indices onto the same code. That's exactly
+    // what an earlier gamma LUT did (indices 14 and 15 landed on the same
+    // code, genuinely indistinguishable on hardware, dithering or not -- see
+    // dithering_investigation.md on the gamma-dithering branch). Sending the
+    // stored intensity straight through is the only way to guarantee all 16
+    // stored levels are all 16 distinct codes.
+    assign grey = visible ? seg_int : 4'h0;
 
-    // level is combinational from the x_px pipeline stage, one cycle behind the
+    // grey is combinational from the x_px pipeline stage, one cycle behind the
     // raw sync outputs, so delay the syncs to match.
     always @(posedge clk) begin
         hsync <= vga_hsync;

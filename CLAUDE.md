@@ -17,9 +17,12 @@ it was computed for.
 
 ## Toolchain
 
-`oss-cad-suite` (yosys / nextpnr / icestorm / iverilog) is **not on PATH by default**:
+`oss-cad-suite` (yosys / nextpnr / icestorm / iverilog / verilator) is **not on
+PATH by default**, and the cocotb suite additionally needs its Python (not just
+its `bin/`) on PATH, so source the environment script rather than just
+prepending `bin`:
 
-    export PATH=~/asic/oss-cad-suite/bin:$PATH
+    source ~/asic/oss-cad-suite/environment
 
 FPGA builds also want tt-support-tools, defaulting to `~/asic/tt-support-tools`;
 override with `TT_TOOLS=`.
@@ -31,8 +34,22 @@ override with `TT_TOOLS=`.
     make flash PORT=/dev/ttyACM4    # upload to the demoboard (needs tt-support-tools' venv)
 
     make -C test IHP_SRAM=1         # same suite against the IHP macro instead of an inferred array
-    make -C test delay-sweep        # vsync latency sweep, ~10 min, writes frame_delay_*.png
+    make -C test delay-sweep        # vsync latency sweep, ~10 min under icarus, writes frame_delay_*.png
     make -C test gold               # rewrite the gold images after an intended change
+
+Prefer `SIM=verilator` for the frame-capture tests and `gold` specifically --
+icarus takes 1-4 minutes per frame-capture test, verilator ~35-55s for the
+same test, and the full `gold` regeneration (3 frame captures + the delay
+sweep's 0us case) in well under 3 minutes instead of most of `delay-sweep`'s
+~10. Icarus stays the default (`SIM ?= icarus` in `test/Makefile`) since it's
+what CI and the gate-level (`GATES=yes`) run are proven against; verilator is
+opt-in for local iteration:
+
+    SIM=verilator make -C test gold
+
+Note `test/Makefile` gates `-g2012` (Icarus) vs `--language 1800-2012`
+(Verilator) on `$(SIM)` -- they're the same language-level flag under
+different names, not a real behavioural difference between the two.
 
 A single cocotb test:
 
@@ -93,8 +110,8 @@ See "If the picture tears" in `README.md`.
 ### Geometry is written down twice
 
 `src/multi_seg_monitor.v` and `tools/segments.py` both encode the segment
-rectangles, the gamma table and the nibble ordering. If one changes the other must
-too, or the round-trip test will say so. Nibble order within a digit word is fixed
+rectangles and the nibble ordering. If one changes the other must too, or the
+round-trip test will say so. Nibble order within a digit word is fixed
 low-to-high as `a, b, c, d, e, f, g, DP` — host software depends on it.
 
 ### Pinout
@@ -122,7 +139,7 @@ Two layers, deliberately:
   plausible lit fraction. These say the picture is legal.
 - **Gold images** (`test/gold/`) — three deterministic captures compared pixel for
   pixel. These say it is the *same* picture, which is what catches a segment a pixel
-  wide or a gamma entry off by one. A mismatch writes `<name>_diff.png` with the
+  wide or a brightness code off by one. A mismatch writes `<name>_diff.png` with the
   disagreeing pixels in red. `make -C test gold` rewrites them; **look at what it
   produces before committing, because nothing else will.**
 

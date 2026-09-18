@@ -20,7 +20,6 @@ SOURCES  = src/tt_um_multi_seg_monitor.v \
            src/VgaSyncGen.v \
            src/line_buffer.v \
            src/seg7_rom.v \
-           src/gamma.v \
            src/stream_in.v
 
 BUILD    = build
@@ -56,7 +55,6 @@ $(BUILD)/$(TOP).bin: $(BUILD)/$(TOP).asc
 test:
 	$(MAKE) -C test
 	cd tools && python3 test_video2seg.py
-	cd tools && python3 test_segments.py
 
 # Formal properties (SymbiYosys). Separate from `test`: these check RTL
 # invariants directly rather than simulated behaviour, and one property

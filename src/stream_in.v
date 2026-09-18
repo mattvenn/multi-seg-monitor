@@ -53,7 +53,12 @@ module stream_in #(
         end else begin
             if (grant) begin
                 req <= 1'b0;
+                // verilator lint_off WIDTHEXPAND
+                // ROW_BYTES is an unsized parameter (32-bit by Verilog default)
+                // compared against 8-bit s_byte; values always fit (<=256), so
+                // this is a width-checker nitpick, not a real truncation risk.
                 if (s_byte == ROW_BYTES - 1) begin
+                // verilator lint_on WIDTHEXPAND
                     s_byte <= 0;
                     s_row  <= (s_row == ROWS - 1) ? 6'd0 : s_row + 1'b1;
                 end else begin

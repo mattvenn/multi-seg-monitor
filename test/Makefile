@@ -17,7 +17,6 @@ VERILOG_SOURCES += $(SRC_DIR)/multi_seg_monitor.v
 VERILOG_SOURCES += $(SRC_DIR)/VgaSyncGen.v
 VERILOG_SOURCES += $(SRC_DIR)/line_buffer.v
 VERILOG_SOURCES += $(SRC_DIR)/seg7_rom.v
-VERILOG_SOURCES += $(SRC_DIR)/gamma.v
 VERILOG_SOURCES += $(SRC_DIR)/stream_in.v
 
 # Swap the inferred array for the IHP macro, which is what the ASIC build
@@ -53,7 +52,13 @@ endif
 
 VERILOG_SOURCES += $(PWD)/tb.v
 
+# -g2012 selects IEEE1800-2012 (SystemVerilog) generation -- an Icarus-specific
+# flag name; Verilator takes the same language level via --language instead.
+ifeq ($(SIM),icarus)
 COMPILE_ARGS += -g2012
+else ifeq ($(SIM),verilator)
+COMPILE_ARGS += --language 1800-2012
+endif
 
 TOPLEVEL = tb
 COCOTB_TEST_MODULES = test_multi_seg

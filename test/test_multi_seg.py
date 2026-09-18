@@ -177,6 +177,14 @@ async def test_render_frame(dut):
     frac = total / (width * height)
     assert 0.05 < frac < 0.60, f"lit fraction {frac:.3f} is implausible"
 
+    # The generator is the only way to see the design with no host attached, so
+    # it should exercise every one of the 16 DAC codes somewhere in the frame --
+    # not just the odd ones. 0 comes from the unlit margins/corners/gaps; 1-15
+    # must come from gen_int.
+    seen = {px[(y * width + x) * 3] // 17 for y in range(height) for x in range(width)}
+    missing = set(range(16)) - seen
+    assert not missing, f"DAC codes never seen in the generator frame: {sorted(missing)}"
+
     png.write_png("frame.png", width, height, px)
     dut._log.info("frame ok: %.1f%% of pixels lit, wrote frame.png", frac * 100)
 
@@ -277,9 +285,8 @@ async def test_stream_frame(dut):
             sent = segments.unpack_digit(frame[off : off + 4])
             for seg in range(8):
                 x, y = segments.segment_centre(col, row, seg)
-                # The design emits grey = level[5:2], so the 6 bit gamma entry
-                # loses its bottom two bits on the way to the pmod.
-                want = segments.GAMMA[sent[seg]] >> 2
+                # No gamma stage: the stored intensity is the DAC code.
+                want = sent[seg]
                 got = level_at(x, y)
                 if got != want:
                     bad.append((col, row, segments.SEGMENTS[seg][0], sent[seg], want, got))
@@ -366,9 +373,8 @@ def analyse(px, width, frame):
 
     def want(col, row, seg):
         off = segments.digit_offset(col, row)
-        # The design emits grey = level[5:2], so the 6 bit gamma entry loses its
-        # bottom two bits on the way to the pmod.
-        return segments.GAMMA[segments.unpack_digit(frame[off : off + 4])[seg]] >> 2
+        # No gamma stage: the stored intensity is the DAC code.
+        return segments.unpack_digit(frame[off : off + 4])[seg]
 
     wrong = stale = 0
     first_bad = {}
@@ -473,7 +479,7 @@ def read_ppm(path):
 # corners dark, no blank row, a sane lit fraction.  They do not say it is the
 # same picture as yesterday, and most of what one would want to catch here is a
 # change in appearance rather than a violation of a rule: a segment one pixel
-# wide, a gamma entry off by one, a digit row rendered from the wrong buffer.
+# wide, a brightness code off by one, a digit row rendered from the wrong buffer.
 # Comparing against a committed image catches all of those.
 #
 # Only deterministic frames are golden.  The delay sweep's corrupted captures

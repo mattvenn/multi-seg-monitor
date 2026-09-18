@@ -2,7 +2,7 @@
 """
 Render a frame from a .seg stream as the display would show it.
 
-A software model of the renderer, for judging framing and gamma without a
+A software model of the renderer, for judging framing and brightness without a
 monitor or a simulation:
 
     ./seg2png.py clip.seg preview.png --frame 30
@@ -10,7 +10,7 @@ monitor or a simulation:
 
 --levels 4 truncates to the 2 bits per channel the prototype pmod carries, which
 is worth looking at before assuming a clip will survive the FPGA bring-up: 4
-levels is a long way from 64.
+levels is a long way from 16.
 """
 
 import argparse
@@ -28,12 +28,12 @@ def render(frame, levels):
             off = segments.digit_offset(col, row)
             intensity = segments.unpack_digit(frame[off : off + 4])
             for seg in range(8):
-                value = segments.GAMMA[intensity[seg]]
+                code = intensity[seg]  # sent straight to the DAC -- no gamma stage
                 if levels == 4:
                     # The prototype keeps the top 2 bits, so rescale to match.
-                    value = (value >> 4) * 85
+                    value = (code >> 2) * 85
                 else:
-                    value = value * 255 // 63
+                    value = code * 17  # 0-15 -> 0-255, exact (15*17 == 255)
                 if not value:
                     continue
                 x0, x1, y0, y1 = segments.segment_pixels(col, row, seg)
@@ -54,9 +54,9 @@ def main():
     ap.add_argument(
         "--levels",
         type=int,
-        default=64,
-        choices=(4, 64),
-        help="64 for the custom pmod, 4 for the Tiny VGA prototype",
+        default=16,
+        choices=(4, 16),
+        help="16 for the direct 4-bit output, 4 for the Tiny VGA prototype",
     )
     args = ap.parse_args()
 

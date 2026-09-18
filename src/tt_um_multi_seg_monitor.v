@@ -10,13 +10,13 @@ module tt_um_multi_seg_monitor (
     input  wire       rst_n     // reset_n - low to reset
 );
 
-    wire [5:0] level;
+    wire [3:0] grey;
     wire hsync, vsync;
 
     // Prototype output: Digilent PmodVGA (4 bits/channel), spanning uo_out and the
     // low 6 bits of uio -- R/B on uo_out, G/HS/VS on uio, matching how the board's
     // two 6-pin connectors land when plugged straight across both TT headers with
-    // no rewiring.  The native 6 bit intensity is truncated to 4 bits and
+    // no rewiring.  The stored 4-bit intensity goes straight to the DAC and is
     // replicated across R, G and B to give grey: 16 levels rather than the Tiny
     // VGA prototype's 4, still short of the native 64 the custom ladder Pmod would
     // give.  See SPEC.md section 5.
@@ -28,7 +28,6 @@ module tt_um_multi_seg_monitor (
     // PmodVGA leaves those two not-connected, which is what freed them up for
     // this. uio[5:0] are now outputs (video), uio[7:6] stay inputs (stream
     // control), so uio_oe is no longer all-input.
-    wire [3:0] grey = level[5:2];
 
     assign uo_out[3:0] = grey;  // R0-R3
     assign uo_out[7:4] = grey;  // B0-B3
@@ -49,7 +48,7 @@ module tt_um_multi_seg_monitor (
         .stream_mode (uio_in[7]),
         .hsync       (hsync),
         .vsync       (vsync),
-        .level       (level)
+        .grey        (grey)
     );
 
     // verilator lint_off UNUSEDSIGNAL

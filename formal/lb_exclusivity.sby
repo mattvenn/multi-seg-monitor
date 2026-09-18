@@ -6,7 +6,7 @@ depth 5
 smtbmc
 
 [script]
-read -formal -D FORMAL_WE_RE multi_seg_monitor.v VgaSyncGen.v line_buffer.v seg7_rom.v gamma.v stream_in.v
+read -formal -D FORMAL_WE_RE multi_seg_monitor.v VgaSyncGen.v line_buffer.v seg7_rom.v stream_in.v
 prep -top multi_seg_monitor
 
 [files]
@@ -14,5 +14,4 @@ prep -top multi_seg_monitor
 ../src/VgaSyncGen.v
 ../src/line_buffer.v
 ../src/seg7_rom.v
-../src/gamma.v
 ../src/stream_in.v

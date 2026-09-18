@@ -18,7 +18,10 @@ reasoning behind it, and [resolution_discussion.md](resolution_discussion.md) se
 # Controls
 
 * Data to display
-* Levels of brightness — 4 bits per segment, gamma corrected
+* Levels of brightness — 4 bits per segment, sent to the DAC directly: 16 stored
+  levels, 16 distinct output codes, no gamma stage (a 4-bit DAC can't fit a
+  non-trivial gamma curve and still keep all 16 distinct -- see the comment
+  above `grey` in `src/multi_seg_monitor.v`)
 * Colour — set by a jumper on the output PMOD, not at runtime. Six output pins cannot
   carry both fine gradation and per-pixel colour, and every display this imitates is
   single colour anyway.
@@ -80,7 +83,7 @@ illegible.
 
 Three captures are also compared pixel for pixel against committed images in
 `test/gold/`, which is what catches a change in how the picture looks rather than a
-violation of a rule — a segment a pixel wide, a gamma entry off by one. A mismatch
+violation of a rule — a segment a pixel wide, a brightness code off by one. A mismatch
 writes a `_diff.png` with the disagreeing pixels in red. After an intended change,
 `make -C test gold` rewrites them; look at what it produces before committing, as
 nothing else will.
@@ -102,10 +105,10 @@ missing `klayout` and `chevron` on the machine this was written on —
 
 The prototype output is a **Digilent PmodVGA** across both output headers: R on
 `uo_out[3:0]`, B on `uo_out[7:4]`, G on `uio[3:0]`, hsync on `uio[4]` and vsync on
-`uio[5]`. The 6 bit intensity is truncated to 4 and replicated across all three
-channels, so the picture is grey at 16 levels rather than the native 64. Strobe and
-mode select sit on `uio[6]` and `uio[7]`, which is where PmodVGA leaves two pins not
-connected.
+`uio[5]`. The stored 4-bit intensity is replicated across all three channels as-is
+(no gamma stage), so the picture is grey at 16 levels, matching the DAC exactly.
+Strobe and mode select sit on `uio[6]` and `uio[7]`, which is where PmodVGA leaves
+two pins not connected.
 
 **1. Internal generator, no firmware.** Leave `uio[7]` low and the design ignores the
 stream port entirely. You should get a 64x37 grid of hex digits scrolling diagonally

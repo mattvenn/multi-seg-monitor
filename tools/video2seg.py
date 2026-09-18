@@ -12,9 +12,11 @@ Output is raw frames of 9472 bytes, ready to copy to the demoboard.
 
     ./video2seg.py clip.mp4 clip.seg --fps 24
 
-Averaging happens in linear light.  Video luma is gamma encoded, and the chip's
-gamma LUT expects a linear intensity index (SPEC.md section 2.1), so both ends
-have to be undone and redone or midtones come out wrong.
+Averaging happens in linear light.  Video luma is gamma encoded, but the chip
+has no gamma stage of its own -- the stored intensity goes straight to the DAC
+(src/multi_seg_monitor.v) -- so the source's encoding still has to be undone
+before averaging or midtones come out wrong; there's just nothing to redo on
+the other end any more.
 """
 
 import argparse
