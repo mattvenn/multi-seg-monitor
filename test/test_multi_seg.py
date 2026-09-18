@@ -32,6 +32,12 @@ CELL_W, CELL_H = 12, 16
 MARGIN_X = 16
 MARGIN_Y = 4
 
+# The GDS action runs the suite as `GATES=yes make`.  Tests that reach into
+# user_project for internal nets (or into tb.v's RTL-only palette instance)
+# have nothing to reach in the flattened gate-level netlist, so they skip there.
+GATES = os.environ.get("GATES") == "yes"
+rtl_only = cocotb.test(skip=GATES)
+
 # On PmodVGA every uo_out bit carries colour -- R in the low nibble, B in the
 # high one -- and green sits on uio_out[3:0].  The old Tiny VGA mask here left
 # two of those bits and all of green unchecked.  tb.v already splits the pins
@@ -366,7 +372,7 @@ async def test_render_frame_palette2(dut):
     check_gold(dut, "generator_palette2.png", width, height, px)
 
 
-@cocotb.test()
+@rtl_only
 async def test_palette_matches_python_table(dut):
     """src/palette.v must match tools/segments.py's PALETTES entry-for-entry
     -- the anti-transcription-drift check for the hand-translated RTL case
@@ -390,7 +396,7 @@ async def test_palette_matches_python_table(dut):
     dut._log.info("all 4 palettes match tools/segments.py exactly")
 
 
-@cocotb.test()
+@rtl_only
 async def test_strap_latches_last_value_before_reset_rises(dut):
     """The strap register re-samples every cycle rst_n is low, so the value
     it holds is whatever ui_in showed on the last low cycle, not the first --
@@ -414,7 +420,7 @@ async def test_strap_latches_last_value_before_reset_rises(dut):
     assert int(dut.user_project.palette_sel.value) == 1
 
 
-@cocotb.test()
+@rtl_only
 async def test_tiny_vga_pin_mapping(dut):
     """Tiny VGA mode's uo_out is a pure combinational function of the core's
     r/g/b/hsync/vsync, reconstructed from this repo's first commit (d7fee74):
@@ -451,7 +457,7 @@ async def test_tiny_vga_pin_mapping(dut):
     dut._log.info("Tiny VGA pin mapping holds across 300 cycles")
 
 
-@cocotb.test()
+@rtl_only
 async def test_strap_does_not_couple_to_stream_data_after_reset(dut):
     """Once rst_n rises, ui_in[2:0] reverts to ordinary stream-data bits --
     the latched pmod_type/palette_sel must never move again, no matter what

@@ -54,6 +54,10 @@ module tb ();
     reg  [3:0] dbg_pal_idx;
     wire [3:0] dbg_pal_r, dbg_pal_g, dbg_pal_b;
 
+    // RTL-only: the gate-level netlist is flattened to one module, so there is
+    // no `palette` to instantiate under GL_TEST, and test_palette_matches_
+    // python_table skips itself there (it checks the RTL table, not gates).
+`ifndef GL_TEST
     palette dbg_pal (
         .sel (dbg_pal_sel),
         .idx (dbg_pal_idx),
@@ -61,19 +65,20 @@ module tb ();
         .g   (dbg_pal_g),
         .b   (dbg_pal_b)
     );
+`endif
 
     // Pixel capture, muxed on the reset-time strap (src/tt_um_multi_seg_monitor.v).
     // Digilent PmodVGA (4 bits/channel) spans uo_out and uio; Tiny VGA
     // (2 bits/channel) is uo_out only with a different bit order -- see that
-    // file for both. Reaches into the hierarchy for the strap, so, like the
-    // line buffer assertion below, this is RTL-sim only: the gate-level
-    // netlist has no `user_project.pmod_type`, so Tiny-VGA-mode gold-image
-    // capture does not exist under GL_TEST today.
-`ifndef GL_TEST
-    wire capture_tiny = user_project.pmod_type;
-`else
-    wire capture_tiny = 1'b0;
-`endif
+    // file for both. The testbench latches ui_in[0] itself, the same way the
+    // chip does (resampled every cycle rst_n is low), rather than reaching
+    // into user_project for the strap: the gate-level netlist has no
+    // `pmod_type` net to reach, and this way the Tiny VGA gold image runs
+    // under GL_TEST too, still depending only on pins.
+    reg capture_tiny = 1'b0;
+    always @(posedge clk)
+        if (!rst_n)
+            capture_tiny <= ui_in[0];
 
     wire hs = capture_tiny ? uo_out[7] : uio_out[4];
     wire vs = capture_tiny ? uo_out[3] : uio_out[5];
