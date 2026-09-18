@@ -20,7 +20,7 @@ DATA_BASE = 17  # ui_in[0..7] -> GPIO17..24, see firmware/seg_player.py
 PIXEL_HZ = 40_000_000  # required VGA pixel clock, 800x600@60
 
 
-def main(pmod_type=1, palette=0):
+def main(pmod_type=1, palette=3):
     """
     `pmod_type`/`palette` pick the reset-time strap: pmod_type 0=Digilent
     PmodVGA (default), 1=Tiny VGA; palette 0-3 selects one of

@@ -1,14 +1,15 @@
 """
 Checks for the palette table (tools/segments.py's PALETTES), which mirrors
 src/palette.v the same way SEGMENTS mirrors the RTL's segment zones -- if one
-changes the other must too, or test_palette.py's RTL-vs-Python comparison
-will say so.
+changes the other must too, or test_palette_matches_python_table in
+test/test_multi_seg.py will say so.
 
-These are the two hard invariants src/palette.v's header comment documents:
-every palette must keep all 16 stored intensities distinct in the combined
-RGB output, both at full precision and after Tiny VGA's 2-bit/channel
-truncation, and must map intensity 0 to black (index 0 is also every
-non-segment background/margin pixel, not just an explicitly dark segment).
+The rules, from the gamma-collision lesson (src/palette.v's header comment):
+intensity 0 must be black (it is also every non-segment background pixel), a
+brighter stored level must never look dimmer, and entries 1-15 must stay
+distinct. Palettes 1-3 (blue, green, purple, from tools/palette_builder) set
+entry 1 to black on purpose, so they have 15 distinct levels rather than 16.
+Surviving Tiny VGA's 2-bit/channel truncation is deliberately not a rule.
 """
 
 import segments
@@ -34,35 +35,36 @@ def test_every_palette_maps_zero_to_black():
         assert palette[0] == (0, 0, 0), f"palette {n} index 0: {palette[0]}"
 
 
-def test_every_palette_is_sixteen_way_distinct_at_full_precision():
+def test_brightness_never_falls_as_the_index_rises():
     for n, palette in enumerate(segments.PALETTES):
-        assert len(set(palette)) == 16, f"palette {n} has collisions: {palette}"
+        lum = [sum(c) for c in palette]
+        assert all(a <= b for a, b in zip(lum, lum[1:])), f"palette {n}: {lum}"
 
 
-def test_colour_palettes_are_sixteen_way_distinct_after_tiny_vga_truncation():
-    """Tiny VGA mode truncates each channel to its top 2 bits in the wrapper
-    (src/tt_um_multi_seg_monitor.v). A palette only distinct before that
-    truncation would silently collapse levels under Tiny VGA, the same class
-    of bug the removed src/gamma.v had -- so palettes 1-3 (which spend hue,
-    not just brightness, and exist partly to recover this) must survive it.
-
-    Palette 0 is deliberately exempt: it is the plain grey ramp kept
-    byte-identical to today's direct-to-DAC mapping for backward
-    compatibility (see test_palette_zero_is_todays_grey_identity), and a
-    pure grey ramp truncated to 2 bits/channel inherently collapses to 4
-    levels -- that is the original historical Tiny VGA behaviour this
-    project shipped with, not a regression, and no amount of table-choosing
-    can avoid it for a single-channel-varying ramp. Selecting palette 0
-    under Tiny VGA reproduces that historical 4-level result on purpose.
-    """
+def test_entries_one_to_fifteen_are_distinct():
     for n, palette in enumerate(segments.PALETTES):
-        if n == 0:
-            continue
-        truncated = {(r >> 2, g >> 2, b >> 2) for r, g, b in palette}
-        assert len(truncated) == 16, (
-            f"palette {n} collides under 2-bit/channel truncation: "
-            f"{[(r >> 2, g >> 2, b >> 2) for r, g, b in palette]}"
-        )
+        assert len(set(palette[1:])) == 15, f"palette {n} has collisions: {palette}"
+
+
+def test_grey_keeps_all_sixteen_levels_and_tints_have_fifteen():
+    assert len(set(segments.PALETTES[0])) == 16
+    for n in (1, 2, 3):
+        assert len(set(segments.PALETTES[n])) == 15, f"palette {n}"
+        assert segments.PALETTES[n][1] == (0, 0, 0), f"palette {n} entry 1"
+
+
+def test_tinted_palettes_match_palette_builder_files():
+    """The palettes are designed in tools/palette_builder/palettes/*.json and
+    copied into segments.py; this catches a re-export that wasn't pasted."""
+    import json
+    import os
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    for n, name in ((1, "blue"), (2, "green"), (3, "purple")):
+        path = os.path.join(here, "palette_builder", "palettes", f"{name}.json")
+        with open(path) as f:
+            entries = [tuple(e) for e in json.load(f)["entries"]]
+        assert segments.PALETTES[n] == entries, f"palette {n} differs from {name}.json"
 
 
 def test_verify_palettes_accepts_the_real_table():
@@ -71,7 +73,7 @@ def test_verify_palettes_accepts_the_real_table():
 
 def test_verify_palettes_rejects_a_collision():
     bad = [list(p) for p in segments.PALETTES]
-    bad[1][3] = bad[1][5]  # force a full-precision collision
+    bad[1][5] = bad[1][7]  # collision among entries 1-15 (also breaks the ramp order)
     try:
         segments.verify_palettes(bad)
     except AssertionError:
@@ -89,6 +91,17 @@ def test_verify_palettes_rejects_nonblack_zero():
         pass
     else:
         raise AssertionError("verify_palettes() accepted a non-black index 0")
+
+
+def test_verify_palettes_rejects_a_dimmer_higher_index():
+    bad = [list(p) for p in segments.PALETTES]
+    bad[3][9], bad[3][10] = bad[3][10], bad[3][9]
+    try:
+        segments.verify_palettes(bad)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("verify_palettes() accepted a non-monotonic palette")
 
 
 if __name__ == "__main__":

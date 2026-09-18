@@ -8,29 +8,26 @@
 // into being the identity -- a non-trivial curve can only ever collide two
 // stored indices onto the same code, which is what made indices 14 and 15
 // genuinely indistinguishable on hardware (dithering_investigation.md on the
-// gamma-dithering branch). A *multi-channel* palette is not bound by that
-// proof: varying hue, not just brightness, independently across R/G/B can
-// place all 16 stored levels at 16 distinct points in combined-RGB space
-// without any single channel being injective on its own.
-//
-// Two hard rules apply to every palette here, checked against
-// tools/segments.py's PALETTES table (the source of truth this case
-// statement is generated from) by test/test_palette.py:
-//   1. All 16 entries are pairwise distinct as combined (r, g, b) triples.
-//   2. Entry 0 is (0, 0, 0) -- index 0 is used both for an explicitly-zeroed
+// gamma-dithering branch). The tables below are generated from
+// tools/segments.py's PALETTES (designed in tools/palette_builder), which is
+// the source of truth; test_palette_matches_python_table in
+// test/test_multi_seg.py fails if this file drifts from it, and
+// tools/test_palettes.py checks the rules on the Python side:
+//   1. Entry 0 is (0, 0, 0) -- index 0 is used both for an explicitly-zeroed
 //      segment and every non-segment background/margin pixel
 //      (multi_seg_monitor.v's `visible`), so a palette that colours it would
 //      tint the whole background, not just dim a segment.
+//   2. Brightness never decreases as the index rises.
+//   3. Entries 1-15 are pairwise distinct.
 //
-// A third rule applies to palettes 1-3 only: they stay 16-way distinct even
-// after Tiny VGA mode's 2-bit/channel truncation
-// (src/tt_um_multi_seg_monitor.v keeps each channel's top 2 bits). Palette 0
-// is exempt on purpose -- it is the plain grey ramp (r=g=b=idx) kept
-// byte-identical to the old direct-to-DAC mapping so existing gold images
-// and round-trip tests need no changes, and a single-channel-varying ramp
-// truncated to 2 bits/channel inherently collapses to 4 levels: that is the
-// original Tiny VGA prototype's documented behaviour (SPEC.md section 7),
-// not a bug. Palettes 1-3 spend hue precisely to avoid that collapse.
+// Palette 0 is the plain grey ramp kept byte-identical to the old
+// direct-to-DAC mapping, so existing gold images need no changes. Palettes
+// 1-3 are tinted ramps whose entry 1 is black on purpose, so stored level 1
+// looks the same as off (15 distinct levels, not 16).
+//
+// Tiny VGA mode keeps only each channel's top 2 bits
+// (src/tt_um_multi_seg_monitor.v), and a smooth single-hue ramp cannot stay
+// distinct through that: 4 levels for grey, 7-9 for the tinted palettes.
 //
 // Synthesised as logic on both ASIC and FPGA rather than living in memory --
 // keeping it out of a RAM removes one more way the two platforms could
@@ -46,7 +43,7 @@ module palette (
 
     always @* begin
         case (sel)
-            // palette 0: today's grey, r=g=b=idx
+            // palette 0: grey, r=g=b=idx
             2'd0: case (idx)
                 4'd0 : {r, g, b} = {4'd0, 4'd0, 4'd0};
                 4'd1 : {r, g, b} = {4'd1, 4'd1, 4'd1};
@@ -65,62 +62,62 @@ module palette (
                 4'd14: {r, g, b} = {4'd14, 4'd14, 4'd14};
                 4'd15: {r, g, b} = {4'd15, 4'd15, 4'd15};
             endcase
-            // palette 1
+            // palette 1: blue
             2'd1: case (idx)
                 4'd0 : {r, g, b} = {4'd0, 4'd0, 4'd0};
-                4'd1 : {r, g, b} = {4'd0, 4'd5, 4'd5};
-                4'd2 : {r, g, b} = {4'd0, 4'd10, 4'd10};
-                4'd3 : {r, g, b} = {4'd0, 4'd15, 4'd15};
-                4'd4 : {r, g, b} = {4'd5, 4'd0, 4'd5};
-                4'd5 : {r, g, b} = {4'd5, 4'd5, 4'd0};
-                4'd6 : {r, g, b} = {4'd5, 4'd10, 4'd15};
-                4'd7 : {r, g, b} = {4'd5, 4'd15, 4'd10};
-                4'd8 : {r, g, b} = {4'd10, 4'd0, 4'd10};
-                4'd9 : {r, g, b} = {4'd10, 4'd5, 4'd15};
-                4'd10: {r, g, b} = {4'd10, 4'd10, 4'd0};
-                4'd11: {r, g, b} = {4'd10, 4'd15, 4'd5};
-                4'd12: {r, g, b} = {4'd15, 4'd0, 4'd15};
-                4'd13: {r, g, b} = {4'd15, 4'd5, 4'd10};
-                4'd14: {r, g, b} = {4'd15, 4'd10, 4'd5};
-                4'd15: {r, g, b} = {4'd15, 4'd15, 4'd0};
+                4'd1 : {r, g, b} = {4'd0, 4'd0, 4'd0};
+                4'd2 : {r, g, b} = {4'd0, 4'd1, 4'd2};
+                4'd3 : {r, g, b} = {4'd0, 4'd2, 4'd4};
+                4'd4 : {r, g, b} = {4'd0, 4'd3, 4'd6};
+                4'd5 : {r, g, b} = {4'd0, 4'd4, 4'd9};
+                4'd6 : {r, g, b} = {4'd0, 4'd5, 4'd11};
+                4'd7 : {r, g, b} = {4'd0, 4'd6, 4'd13};
+                4'd8 : {r, g, b} = {4'd0, 4'd8, 4'd15};
+                4'd9 : {r, g, b} = {4'd2, 4'd9, 4'd15};
+                4'd10: {r, g, b} = {4'd4, 4'd10, 4'd15};
+                4'd11: {r, g, b} = {4'd6, 4'd11, 4'd15};
+                4'd12: {r, g, b} = {4'd9, 4'd12, 4'd15};
+                4'd13: {r, g, b} = {4'd11, 4'd13, 4'd15};
+                4'd14: {r, g, b} = {4'd13, 4'd14, 4'd15};
+                4'd15: {r, g, b} = {4'd15, 4'd15, 4'd15};
             endcase
-            // palette 2
+            // palette 2: green
             2'd2: case (idx)
                 4'd0 : {r, g, b} = {4'd0, 4'd0, 4'd0};
-                4'd1 : {r, g, b} = {4'd5, 4'd0, 4'd5};
-                4'd2 : {r, g, b} = {4'd10, 4'd0, 4'd10};
-                4'd3 : {r, g, b} = {4'd15, 4'd0, 4'd15};
-                4'd4 : {r, g, b} = {4'd5, 4'd5, 4'd0};
-                4'd5 : {r, g, b} = {4'd0, 4'd5, 4'd5};
-                4'd6 : {r, g, b} = {4'd15, 4'd5, 4'd10};
-                4'd7 : {r, g, b} = {4'd10, 4'd5, 4'd15};
-                4'd8 : {r, g, b} = {4'd10, 4'd10, 4'd0};
-                4'd9 : {r, g, b} = {4'd15, 4'd10, 4'd5};
-                4'd10: {r, g, b} = {4'd0, 4'd10, 4'd10};
-                4'd11: {r, g, b} = {4'd5, 4'd10, 4'd15};
-                4'd12: {r, g, b} = {4'd15, 4'd15, 4'd0};
-                4'd13: {r, g, b} = {4'd10, 4'd15, 4'd5};
-                4'd14: {r, g, b} = {4'd5, 4'd15, 4'd10};
-                4'd15: {r, g, b} = {4'd0, 4'd15, 4'd15};
+                4'd1 : {r, g, b} = {4'd0, 4'd0, 4'd0};
+                4'd2 : {r, g, b} = {4'd0, 4'd2, 4'd1};
+                4'd3 : {r, g, b} = {4'd0, 4'd4, 4'd3};
+                4'd4 : {r, g, b} = {4'd0, 4'd6, 4'd4};
+                4'd5 : {r, g, b} = {4'd0, 4'd8, 4'd5};
+                4'd6 : {r, g, b} = {4'd0, 4'd10, 4'd7};
+                4'd7 : {r, g, b} = {4'd0, 4'd12, 4'd8};
+                4'd8 : {r, g, b} = {4'd0, 4'd14, 4'd9};
+                4'd9 : {r, g, b} = {4'd2, 4'd14, 4'd10};
+                4'd10: {r, g, b} = {4'd4, 4'd14, 4'd11};
+                4'd11: {r, g, b} = {4'd6, 4'd14, 4'd12};
+                4'd12: {r, g, b} = {4'd9, 4'd15, 4'd13};
+                4'd13: {r, g, b} = {4'd11, 4'd15, 4'd13};
+                4'd14: {r, g, b} = {4'd13, 4'd15, 4'd14};
+                4'd15: {r, g, b} = {4'd15, 4'd15, 4'd15};
             endcase
-            // palette 3
+            // palette 3: purple
             2'd3: case (idx)
                 4'd0 : {r, g, b} = {4'd0, 4'd0, 4'd0};
-                4'd1 : {r, g, b} = {4'd5, 4'd5, 4'd0};
-                4'd2 : {r, g, b} = {4'd10, 4'd10, 4'd0};
-                4'd3 : {r, g, b} = {4'd15, 4'd15, 4'd0};
-                4'd4 : {r, g, b} = {4'd0, 4'd5, 4'd5};
-                4'd5 : {r, g, b} = {4'd5, 4'd0, 4'd5};
-                4'd6 : {r, g, b} = {4'd10, 4'd15, 4'd5};
-                4'd7 : {r, g, b} = {4'd15, 4'd10, 4'd5};
-                4'd8 : {r, g, b} = {4'd0, 4'd10, 4'd10};
-                4'd9 : {r, g, b} = {4'd5, 4'd15, 4'd10};
-                4'd10: {r, g, b} = {4'd10, 4'd0, 4'd10};
-                4'd11: {r, g, b} = {4'd15, 4'd5, 4'd10};
-                4'd12: {r, g, b} = {4'd0, 4'd15, 4'd15};
-                4'd13: {r, g, b} = {4'd5, 4'd10, 4'd15};
-                4'd14: {r, g, b} = {4'd10, 4'd5, 4'd15};
-                4'd15: {r, g, b} = {4'd15, 4'd0, 4'd15};
+                4'd1 : {r, g, b} = {4'd0, 4'd0, 4'd0};
+                4'd2 : {r, g, b} = {4'd2, 4'd0, 4'd2};
+                4'd3 : {r, g, b} = {4'd4, 4'd0, 4'd4};
+                4'd4 : {r, g, b} = {4'd6, 4'd0, 4'd6};
+                4'd5 : {r, g, b} = {4'd9, 4'd0, 4'd9};
+                4'd6 : {r, g, b} = {4'd11, 4'd0, 4'd11};
+                4'd7 : {r, g, b} = {4'd13, 4'd0, 4'd13};
+                4'd8 : {r, g, b} = {4'd15, 4'd0, 4'd15};
+                4'd9 : {r, g, b} = {4'd15, 4'd2, 4'd15};
+                4'd10: {r, g, b} = {4'd15, 4'd4, 4'd15};
+                4'd11: {r, g, b} = {4'd15, 4'd6, 4'd15};
+                4'd12: {r, g, b} = {4'd15, 4'd9, 4'd15};
+                4'd13: {r, g, b} = {4'd15, 4'd11, 4'd15};
+                4'd14: {r, g, b} = {4'd15, 4'd13, 4'd15};
+                4'd15: {r, g, b} = {4'd15, 4'd15, 4'd15};
             endcase
         endcase
     end

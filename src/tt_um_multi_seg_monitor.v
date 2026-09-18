@@ -65,8 +65,8 @@ module tt_um_multi_seg_monitor (
     // entirely on the header this Pmod doesn't use.
     //
     // Only the top 2 bits of each of the core's 4-bit channels reach a pin;
-    // see palette.v for why every palette except 0 stays 16-way distinct
-    // even after this truncation. Bit order re-derived from d7fee74 above,
+    // that costs levels -- 4 for grey, 7-9 for the tinted palettes, see
+    // palette.v. Bit order re-derived from d7fee74 above,
     // not copied from a paraphrase: uo_out[0]=R1=r[3] (the channel's MSB,
     // matching that commit's grey[1] -> R1), uo_out[4]=R0=r[2], and so on
     // for G/B -- i.e. uo_out[7:0] = {hsync,B0,G0,R0,vsync,B1,G1,R1}.

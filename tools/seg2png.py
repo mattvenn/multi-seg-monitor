@@ -11,9 +11,8 @@ monitor or a simulation:
 
 --levels 4 truncates each channel to the top 2 bits Tiny VGA mode carries,
 worth looking at before assuming a clip reads well there: --palette 0 (the
-default, today's grey) only has 4 distinguishable levels once truncated, by
-design (src/palette.v) -- palettes 1-3 stay 16-way distinct even at 4 levels
-by spending hue instead of just brightness.
+default, grey) only has 4 distinguishable levels once truncated, and the
+tinted palettes 1-3 (blue, green, purple) 7-9 (src/palette.v).
 """
 
 import argparse

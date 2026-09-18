@@ -174,7 +174,7 @@ class Player:
         self.file.close()
 
 
-def main(path="video.seg", video_fps=24.0, pmod_type=1, palette=0):
+def main(path="video.seg", video_fps=24.0, pmod_type=1, palette=3):
     """
     `pmod_type`/`palette` pick the reset-time strap: pmod_type 0=Digilent
     PmodVGA (default), 1=Tiny VGA; palette 0-3 selects one of
