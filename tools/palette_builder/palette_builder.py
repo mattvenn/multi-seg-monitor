@@ -7,12 +7,22 @@ Interactive palette builder for the Multi Segment Monitor.
 
 A palette is three per-channel curves (see "Colour palettes" in
 tools/segments.py): each a line from (0, 0) to a knee, then on through a
-second point until it clips at 15. Drag the two handles of the selected
-channel on the curve plot (or type the numbers) and see the result on a frame
-of the generator or of a droplet clip, as the 12-bit PmodVGA (4 bits/channel)
-or the 6-bit Tiny VGA Pmod (2 bits/channel) would show it. What's drawn is
-always the curve after the chip's own quantisation -- slopes in eighths,
-rounded as the RTL rounds -- never the idealised line.
+second point until it clips at 15. The plot shows the start (fixed at black),
+the knee and the end -- where the line meets the plot's edge -- and you drag
+the knee and the end of the selected channel (or type the knee and a point
+the line passes through) and see the result on a frame
+of the generator, of a droplet clip, or of an attract-mode effect, as the
+12-bit PmodVGA (4 bits/channel) or the 6-bit Tiny VGA Pmod (2 bits/channel)
+would show it. What's drawn is always the curve after the chip's own
+quantisation -- slopes in eighths, rounded as the RTL rounds -- never the
+idealised line.
+
+Effects come from tools/attract_proto.py (plasma, zone plate, interference).
+The left column has two tabs, Colour (the palette curves) and Pattern (the
+effect and its own tuning sliders, rebuilt when you switch effect); both act
+on the one preview. Play runs an effect at the chip's real 60 fps. The
+parameter line under the sliders is the matching attract_proto.py
+command-line, to reproduce a setting or carry it into RTL.
 
 What it writes:
   - palettes/<name>.json: your own curves (Save / Open). Old 16-entry table
@@ -46,6 +56,7 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 sys.path.insert(0, str(HERE.parent))  # tools/, for segments and png
 
+import attract_proto  # noqa: E402
 import png  # noqa: E402
 import segments  # noqa: E402
 
@@ -113,6 +124,40 @@ def index_image_from_png(path):
     return (rgb[..., 0] // 17).astype(np.uint8)
 
 
+_EFFECT_XY = None  # (x, y, is_dp) of every frame nibble's segment centre
+
+
+def _effect_coords():
+    """Segment centres in frame-nibble order, as attract_proto.sample() takes
+    them: pixel coordinates from the grid's top-left, one per segment."""
+    global _EFFECT_XY
+    if _EFFECT_XY is None:
+        n = np.arange(segments.ROWS * segments.COLS * 8)
+        digit, seg = n // 8, n % 8
+        row, col = digit // segments.COLS, digit % segments.COLS
+        x = col * segments.CELL_W + np.array(attract_proto.SEG_CX)[seg]
+        y = row * segments.CELL_H + np.array(attract_proto.SEG_CY)[seg]
+        _EFFECT_XY = (x.astype(np.int64), y.astype(np.int64), seg == 7)
+    return _EFFECT_XY
+
+
+def index_image_from_effect(name, frame, params):
+    """One frame of an attract_proto effect -> (600, 800) uint8 of intensities.
+
+    The effect's sample function is evaluated once over the whole frame as
+    numpy arrays (attract_proto writes its maths so the same code runs on ints
+    or arrays), then scattered like index_image_from_frame. DP stays dark, as
+    in attract_proto.sample().
+    """
+    x, y, is_dp = _effect_coords()
+    levels = np.asarray(attract_proto.EFFECTS[name](frame, **params)(x, y), dtype=np.uint8)
+    levels = np.where(is_dp, 0, levels).astype(np.uint8)
+    mask, nibble_of = _segment_tables()
+    idx = np.zeros(HEIGHT * WIDTH, dtype=np.uint8)
+    idx[mask] = levels[nibble_of]
+    return idx.reshape(HEIGHT, WIDTH)
+
+
 def list_clips(directory):
     """(path, frame_count) for every .seg in `directory` that is a whole number
     of current-geometry frames.  Clips from the 640x480 era are not, and would
@@ -147,6 +192,76 @@ def curve_table(curve):
     """Editable curve -> the 16 (r, g, b) entries the chip will produce.
     Raises ValueError for a curve the hardware can't draw."""
     return segments.curve_palette(segments.points_to_params(curve))
+
+
+# --------------------------------------------------------------------------
+# The end handle.  A curve's second point isn't something the chip keeps -- it
+# stores only the slope, and the line runs on past the point until it clips at
+# 15 -- so a handle drawn at the point sits mid-curve with the line carrying on
+# beyond it.  The editor instead shows the handle where the line actually
+# ends: on the plot's right edge (index 15) or top edge (where it clips).
+#
+# That end is usually between whole numbers: ~11% of legal curves (the steep
+# ones, including preset 2's green channel) have no whole-number point on the
+# edge that draws the same colours.  So the handle's position is computed, and
+# what's stored stays a whole-number point the line passes through --
+# presets.json and saved palettes keep their format, and nothing below the UI
+# changes.
+# --------------------------------------------------------------------------
+
+
+def curve_end(x1, y1, x2, y2):
+    """Where the second line, at the slope the chip actually stores, meets the
+    plot's edge -- as (x, y) floats with x == 15 or y == 15."""
+    m2 = segments.curve_params(x1, y1, x2, y2)[3]
+    reach = y1 * 8 + m2 * (15 - x1)  # eighths, at index 15
+    if reach <= 15 * 8:
+        return 15.0, reach / 8
+    return x1 + (15 - y1) * 8 / m2, 15.0
+
+
+_SLOPES = {}
+
+
+def slope_choices(x1, y1):
+    """Every second slope the chip can store after knee (x1, y1), as
+    (m2, through-point) sorted by slope. The point is a whole-number one that
+    produces that slope, on the edge when one exists so saved files read
+    naturally."""
+    if (x1, y1) not in _SLOPES:
+        best = {}
+        for x2 in range(x1 + 1, 16):
+            for y2 in range(y1, 16):
+                m2 = segments.curve_params(x1, y1, x2, y2)[3]
+                on_edge = x2 == 15 or y2 == 15
+                if m2 not in best or (on_edge and not best[m2][1]):
+                    best[m2] = ((x2, y2), on_edge)
+        _SLOPES[(x1, y1)] = sorted((m2, p) for m2, (p, _e) in best.items())
+    return _SLOPES[(x1, y1)]
+
+
+def end_nearest(x1, y1, fx, fy):
+    """The through-point, after knee (x1, y1), whose line ends nearest the
+    edge position (fx, fy)."""
+    def dist(p):
+        ex, ey = curve_end(x1, y1, *p)
+        return (ex - fx) ** 2 + (ey - fy) ** 2
+
+    return min((p for _m, p in slope_choices(x1, y1)), key=dist)
+
+
+def end_toward(x1, y1, fx, fy):
+    """Drag target for the end handle: the line from the knee aims at the
+    mouse (fx, fy, plot units, anywhere on the plot), and the handle lands on
+    the stored slope whose end is nearest where that aim meets the edge."""
+    dx, dy = fx - x1, max(0.0, fy - y1)
+    if dx <= 0 or y1 + dy / dx * (15 - x1) > 15:
+        # Steep: aims at the top edge.
+        ex = x1 + (15 - y1) * dx / dy if dy > 0 and dx > 0 else x1
+        target = (min(15.0, max(float(x1), ex)), 15.0)
+    else:
+        target = (15.0, y1 + dy / dx * (15 - x1))
+    return end_nearest(x1, y1, *target)
 
 
 def palette_to_lut(palette, bits):
@@ -322,8 +437,13 @@ def safe_name(name):
 # UI
 # --------------------------------------------------------------------------
 
-PLOT = 20  # pixels per index / level on the curve plot
+PLOT = 18  # pixels per index / level on the curve plot -- sized, with the
+# rest of the left column, so the window fits a 1280x800 laptop screen
 PLAY_MS = 1000 // 24  # clip playback frame period; video2seg.py's default fps
+EFFECT_FPS = 60  # effects play at the chip's real frame rate
+EFFECT_FRAMES = 60 * EFFECT_FPS  # the frame slider spans a minute
+SOURCES = ("generator", "droplet", "effect")
+MIN_GAP_MS = 10  # idle time guaranteed between playback ticks, for input
 PAD = 24
 CH_COLOURS = {"r": "#d32f2f", "g": "#2e7d32", "b": "#1565c0"}
 
@@ -349,6 +469,17 @@ class App:
         self._drag = None  # which handle (0 = knee, 1 = second point) is held
         self._syncing = False
         self._playing = None  # the pending after() id while a clip plays
+        self._last_tick = None  # monotonic time of the last effect frame
+        # Effects: which one, each one's parameters (kept per effect for the
+        # session, so switching away and back keeps your tweaks), and where
+        # each source's frame slider was, since clip and effect share it.
+        self.effect = tk.StringVar(value="plasma")
+        self.effect_params = {n: attract_proto.default_params(n) for n in attract_proto.PARAMS}
+        self._effect_idx = (None, None)  # (key, index image) cache
+        self._frame_pos = {"droplet": 0, "effect": 0}
+        self._scale_source = None  # whose frames the slider currently counts
+        self.param_vars = {}
+        self.param_line = tk.StringVar()
 
         self.channel = tk.StringVar(value="r")
         self.source = tk.StringVar(value="generator")
@@ -365,16 +496,24 @@ class App:
         self.clips = list_clips(REPO)
 
         self._build()
-        if self.gen_idx is None and self.clips:
-            self.source.set("droplet")
+        if self.gen_idx is None:
+            self.source.set("droplet" if self.clips else "effect")
+        self._sync_scale()
         self._channel_changed()
 
     # -- layout --
 
     def _build(self):
         tk, ttk = self.tk, self.ttk
-        left = ttk.Frame(self.root, padding=8)
-        left.grid(row=0, column=0, sticky="ns")
+        # Left column: one tab per thing being tuned -- the palette curves, or
+        # the pattern the palette is applied to. Both act on the one preview.
+        self.tabs = ttk.Notebook(self.root)
+        self.tabs.grid(row=0, column=0, sticky="ns", padx=(8, 0), pady=8)
+        left = ttk.Frame(self.tabs, padding=8)
+        self.tabs.add(left, text="Colour")
+        pattern = ttk.Frame(self.tabs, padding=8)
+        self.tabs.add(pattern, text="Pattern")
+        self.pattern_tab = pattern
         right = ttk.Frame(self.root, padding=8)
         right.grid(row=0, column=1, sticky="nsew")
         self.root.columnconfigure(1, weight=1)
@@ -397,7 +536,10 @@ class App:
 
         pts = ttk.Frame(left)
         pts.grid(row=2, column=0, sticky="w")
-        for i, label in enumerate(("knee x", "y", "  then x", "y")):
+        # The second pair is the whole-number point the line passes through
+        # (what's saved), not the end handle, which usually sits between
+        # whole numbers -- see curve_end().
+        for i, label in enumerate(("knee x", "y", "  through x", "y")):
             ttk.Label(pts, text=label).pack(side="left")
             sb = tk.Spinbox(pts, from_=0, to=15, width=3, textvariable=self.point_vars[i],
                             command=self._on_spin)
@@ -416,30 +558,36 @@ class App:
         pre = ttk.LabelFrame(left, text="Start from a built-in preset", padding=4)
         pre.grid(row=4, column=0, sticky="ew", pady=(8, 0))
         for n, p in enumerate(segments.PRESETS):
-            ttk.Button(pre, text=f"{n} {p['name']}", width=9, command=lambda n=n: self._load_preset(n)).grid(
-                row=n // 4, column=n % 4
+            # Three across, not four: the left column has to leave room for
+            # the 1:1 preview on a 1280-wide laptop screen.
+            ttk.Button(pre, text=f"{n} {p['name']}", width=8, command=lambda n=n: self._load_preset(n)).grid(
+                row=n // 3, column=n % 3
             )
 
         io = ttk.LabelFrame(left, text="Save / export", padding=4)
         io.grid(row=5, column=0, sticky="ew", pady=(8, 0))
-        ttk.Entry(io, textvariable=self.name, width=14).grid(row=0, column=0)
-        ttk.Button(io, text="Save", width=6, command=self._save).grid(row=0, column=1)
-        ttk.Button(io, text="Open...", width=7, command=self._open).grid(row=0, column=2)
-        ttk.Button(io, text="Export", width=7, command=self._export).grid(row=0, column=3)
+        ttk.Entry(io, textvariable=self.name, width=14).grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Button(io, text="Save", width=6, command=self._save).grid(row=1, column=0)
+        ttk.Button(io, text="Open...", width=7, command=self._open).grid(row=1, column=1)
+        ttk.Button(io, text="Export", width=7, command=self._export).grid(row=1, column=2)
 
         chip = ttk.LabelFrame(left, text="Chip presets (presets.json -> src/)", padding=4)
         chip.grid(row=6, column=0, sticky="ew", pady=(8, 0))
         ttk.Label(chip, text="slot").grid(row=0, column=0)
         ttk.Spinbox(chip, from_=0, to=segments.N_PRESETS - 1, width=3, textvariable=self.slot).grid(row=0, column=1)
-        ttk.Button(chip, text="Load from slot", command=self._load_slot).grid(row=0, column=2)
-        ttk.Button(chip, text="Save to slot", command=self._save_slot).grid(row=0, column=3)
+        ttk.Button(chip, text="Load", width=5, command=self._load_slot).grid(row=0, column=2)
+        ttk.Button(chip, text="Save", width=5, command=self._save_slot).grid(row=0, column=3)
         ttk.Button(chip, text="Write RTL", command=self._write_rtl).grid(row=0, column=4)
 
         top = ttk.Frame(right)
         top.grid(row=0, column=0, sticky="w")
         ttk.Label(top, text="Source:").pack(side="left")
-        for val, label in (("generator", "Generator"), ("droplet", "Droplet")):
-            ttk.Radiobutton(top, text=label, value=val, variable=self.source, command=self.refresh).pack(side="left")
+        for val, label in (("generator", "Generator"), ("droplet", "Droplet"), ("effect", "Effect")):
+            # No clips (a fresh checkout or worktree: .seg files are
+            # untracked), no Droplet source to choose.
+            state = "disabled" if val == "droplet" and not self.clips else "normal"
+            ttk.Radiobutton(top, text=label, value=val, variable=self.source,
+                            command=self._source_changed, state=state).pack(side="left")
         ttk.Label(top, text="   Output:").pack(side="left")
         for val, label in ((12, "12-bit PmodVGA"), (6, "6-bit Tiny VGA")):
             ttk.Radiobutton(top, text=label, value=val, variable=self.bits, command=self.refresh).pack(side="left")
@@ -447,20 +595,44 @@ class App:
 
         clip = ttk.Frame(right)
         clip.grid(row=1, column=0, sticky="ew", pady=4)
+        # Greyed out with no clips: an empty Combobox's popdown on macOS has
+        # nothing to select, never closes, and holds the grab, so the whole
+        # window went dead.
         self.clip_box = ttk.Combobox(
-            clip, state="readonly", width=28, values=[os.path.basename(p) for p, _ in self.clips]
+            clip, state="readonly" if self.clips else "disabled", width=20,
+            values=[os.path.basename(p) for p, _ in self.clips]
         )
+        if not self.clips:
+            self.clip_box.set("(no .seg clips)")
         self.clip_box.pack(side="left")
         if self.clips:
             best = next((i for i, (p, _) in enumerate(self.clips) if "waterdrop" in p), 0)
             self.clip_box.current(best)
         self.clip_box.bind("<<ComboboxSelected>>", lambda _e: self._clip_changed())
-        self.frame_scale = tk.Scale(clip, from_=0, to=0, orient="horizontal", length=420, command=self._on_frame_scale)
+        self.frame_scale = tk.Scale(clip, from_=0, to=0, orient="horizontal", length=360, command=self._on_frame_scale)
         self.frame_scale.pack(side="left", padx=8)
-        self.play_button = ttk.Button(clip, text="Play", width=6, command=self._toggle_play,
-                                      state="normal" if self.clips else "disabled")
+        self.play_button = ttk.Button(clip, text="Play", width=6, command=self._toggle_play)
         self.play_button.pack(side="left")
-        self._clip_changed(refresh=False)
+
+        # Pattern tab: which effect, then its tuning parameters, rebuilt from
+        # attract_proto's PARAMS whenever the effect changes.
+        pick = ttk.Frame(pattern)
+        pick.grid(row=0, column=0, sticky="w")
+        # Radio buttons, not a Combobox: on macOS a Combobox's popdown stops
+        # taking clicks while playback redraws the preview underneath it, and
+        # holds the grab, so the whole window went dead until the app was
+        # killed.
+        ttk.Label(pick, text="Effect:").pack(side="left")
+        for name in attract_proto.PARAMS:
+            ttk.Radiobutton(pick, text=name, value=name, variable=self.effect,
+                            command=self._effect_changed).pack(side="left")
+        self.param_frame = ttk.LabelFrame(pattern, text="Pattern parameters", padding=8)
+        self.param_frame.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+        self._build_params()
+        # Opening the Pattern tab shows the pattern: tuning one you can't see
+        # is no use. Going back to Colour leaves the source alone, so the
+        # palette can be tuned on the effect too.
+        self.tabs.bind("<<NotebookTabChanged>>", lambda _e: self._tab_changed())
 
         self.preview = tk.Label(right, bd=1, relief="sunken")
         self.preview.grid(row=2, column=0)
@@ -481,14 +653,23 @@ class App:
         y = 15 - round((cy - PAD) / PLOT)
         return min(15, max(0, x)), min(15, max(0, y))
 
+    @staticmethod
+    def _from_canvas_f(cx, cy):
+        """Unrounded plot position, for aiming the end handle."""
+        x = (cx - PAD) / PLOT
+        y = 15 - (cy - PAD) / PLOT
+        return min(15.0, max(0.0, x)), min(15.0, max(0.0, y))
+
     # -- state changes --
 
     def _on_key(self, e):
         if isinstance(e.widget, (self.tk.Entry, self.ttk.Entry, self.ttk.Combobox, self.tk.Spinbox, self.ttk.Spinbox)):
             return
         if e.char == "s":
-            self.source.set("droplet" if self.source.get() == "generator" else "generator")
-            self.refresh()
+            order = [s for s in SOURCES if s != "droplet" or self.clips]
+            cur = self.source.get()
+            self.source.set(order[(order.index(cur) + 1) % len(order)] if cur in order else order[0])
+            self._source_changed()
         elif e.char == "b":
             self.bits.set(6 if self.bits.get() == 12 else 12)
             self.refresh()
@@ -510,29 +691,144 @@ class App:
             self._playing = None
             self.play_button.config(text="Play")
             return
-        if not self.clips:
-            return
-        self.source.set("droplet")
+        if self.source.get() == "generator":
+            # The generator is a still, so Play has to mean something else:
+            # the pattern when that's what's being tuned, or when there are no
+            # clips to play (a fresh checkout or worktree has none -- they're
+            # untracked). Otherwise the clip, as it always has.
+            on_pattern = self.tabs.select() == str(self.pattern_tab)
+            self.source.set("effect" if on_pattern or not self.clips else "droplet")
+            self._sync_scale()
         self.play_button.config(text="Pause")
+        self._last_tick = None
         self._tick()
 
     def _tick(self):
-        """Advance one frame and loop at the end. Paced at the converter's
-        default 24 fps, less however long the frame took to draw, so a slow
-        render slows playback rather than piling up callbacks."""
+        """Advance and loop at the end, less however long the frame took to
+        draw, so a slow render never piles up callbacks.
+
+        A clip steps one frame at a time at the converter's default 24 fps, so
+        a slow render slows it down. An effect runs on wall-clock time at the
+        chip's 60 fps instead, skipping frames if a render is slow -- its
+        speed is one of the things being tuned, so it has to look right.
+        """
         start = time.monotonic()
-        n = self.clips[self.clip_box.current()][1]
-        self.frame_scale.set((int(self.frame_scale.get()) + 1) % max(n, 1))
+        if self.source.get() == "effect":
+            step = 1 if self._last_tick is None else max(1, round((start - self._last_tick) * EFFECT_FPS))
+            self._last_tick = start
+            n, period = EFFECT_FRAMES, 1000 // EFFECT_FPS
+        else:
+            step, period = 1, PLAY_MS
+            n = self.clips[self.clip_box.current()][1] if self.clips else 1
+        self.frame_scale.set((int(self.frame_scale.get()) + step) % max(n, 1))
         self.refresh()
         spent = int((time.monotonic() - start) * 1000)
-        self._playing = self.root.after(max(1, PLAY_MS - spent), self._tick)
+        # Always leave a gap before the next tick. A render plus its redraw
+        # takes longer than a 60 fps frame, and re-arming at 1 ms kept a timer
+        # permanently due -- which on macOS starves Tk's native event queue, so
+        # clicks (the effect dropdown, Pause) were never read and the app
+        # looked hung. Effects follow wall-clock time, so a lower frame rate
+        # still runs at the right speed.
+        self._playing = self.root.after(max(MIN_GAP_MS, period - spent), self._tick)
+
+    def _frame_count(self, source):
+        if source == "effect":
+            return EFFECT_FRAMES
+        return self.clips[self.clip_box.current()][1] if self.clips else 1
+
+    def _sync_scale(self):
+        """Point the shared frame slider at the current source's frames,
+        remembering where the other source's slider was."""
+        src = self.source.get()
+        src = src if src in self._frame_pos else "droplet"
+        if self._scale_source is not None:
+            self._frame_pos[self._scale_source] = int(self.frame_scale.get())
+        n = self._frame_count(src)
+        self.frame_scale.config(to=max(n - 1, 0))
+        self.frame_scale.set(min(self._frame_pos[src], n - 1))
+        self._scale_source = src
+
+    def _source_changed(self):
+        self._sync_scale()
+        self.refresh()
 
     def _clip_changed(self, refresh=True):
-        n = self.clips[self.clip_box.current()][1] if self.clips else 1
-        self.frame_scale.config(to=max(n - 1, 0))
-        self.frame_scale.set(min(self.frame_scale.get(), n - 1))
+        if self.source.get() != "droplet":
+            self.source.set("droplet")
+        self._sync_scale()
         if refresh:
             self.refresh()
+
+    # -- effect parameters --
+
+    def _build_params(self):
+        tk, ttk = self.tk, self.ttk
+        for w in self.param_frame.winfo_children():
+            w.destroy()
+        name = self.effect.get()
+        self.param_frame.config(text=f"Pattern parameters: {name}")
+        values = self.effect_params[name]
+        self.param_vars = {}
+        for i, (key, lo, hi, _default, help_text) in enumerate(attract_proto.PARAMS[name]):
+            var = tk.IntVar(value=values[key])
+            self.param_vars[key] = var
+            ttk.Label(self.param_frame, text=key).grid(row=2 * i, column=0, sticky="sw")
+            tk.Scale(self.param_frame, from_=lo, to=hi, orient="horizontal", length=170,
+                     variable=var, command=lambda _v: self._on_param()).grid(row=2 * i, column=1, sticky="w")
+            tk.Label(self.param_frame, text=help_text, fg="#666666", font=("TkDefaultFont", 9),
+                     wraplength=250, justify="left").grid(row=2 * i + 1, column=0, columnspan=2,
+                                                           sticky="w", pady=(0, 6))
+        n = len(attract_proto.PARAMS[name])
+        ttk.Button(self.param_frame, text="Defaults", command=self._param_defaults).grid(
+            row=2 * n, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(self.param_frame, text="For attract_proto.py (select to copy):").grid(
+            row=2 * n + 1, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Entry(self.param_frame, textvariable=self.param_line, state="readonly", width=34).grid(
+            row=2 * n + 2, column=0, columnspan=2, sticky="ew")
+        self._update_param_line()
+
+    def _update_param_line(self):
+        name = self.effect.get()
+        self.param_line.set(f"{name} {attract_proto.param_args(self.effect_params[name])}")
+
+    def _on_param(self):
+        # Tk also fires this for the initial value when a Scale is built,
+        # deferred to idle, which just costs one redundant render.
+        name = self.effect.get()
+        for key, var in self.param_vars.items():
+            try:
+                self.effect_params[name][key] = int(var.get())
+            except (ValueError, self.tk.TclError):
+                return
+        self._update_param_line()
+        # Tuning a pattern you can't see is no use, so a slider moves the
+        # preview onto the effect.
+        if self.source.get() != "effect":
+            self.source.set("effect")
+            self._sync_scale()
+        if self._playing is None:
+            self.refresh()  # while playing, the next tick picks it up
+
+    def _param_defaults(self):
+        name = self.effect.get()
+        self.effect_params[name] = attract_proto.default_params(name)
+        self._build_params()
+        self._on_param()
+
+    def _show_effect(self):
+        if self.source.get() != "effect":
+            self.source.set("effect")
+            self._sync_scale()
+            self.refresh()
+
+    def _effect_changed(self):
+        self._build_params()
+        self._show_effect()
+        self.refresh()
+
+    def _tab_changed(self):
+        if self.tabs.select() == str(self.pattern_tab):
+            self._show_effect()
 
     def _channel_changed(self):
         self._syncing = True
@@ -562,10 +858,10 @@ class App:
             pass
 
     def _on_press(self, e):
-        x1, y1, x2, y2 = self.curve[self.channel.get()]
+        pts = self.curve[self.channel.get()]
         d = [
             (e.x - cx) ** 2 + (e.y - cy) ** 2
-            for cx, cy in (self._to_canvas(x1, y1), self._to_canvas(x2, y2))
+            for cx, cy in (self._to_canvas(*pts[:2]), self._to_canvas(*curve_end(*pts)))
         ]
         self._drag = 0 if d[0] <= d[1] else 1
         self._on_drag(e)
@@ -573,10 +869,18 @@ class App:
     def _on_drag(self, e):
         if self._drag is None:
             return
-        x, y = self._from_canvas(e.x, e.y)
-        pts = list(self.curve[self.channel.get()])
-        pts[2 * self._drag : 2 * self._drag + 2] = [x, y]
-        self._set_points(pts)
+        x1, y1, x2, y2 = self.curve[self.channel.get()]
+        if self._drag == 0:
+            # The knee moves; the end stays where it is on the edge, rather
+            # than the line swinging about a hidden through-point.
+            end = curve_end(x1, y1, x2, y2)
+            kx, ky = self._from_canvas(e.x, e.y)
+            kx = min(kx, 14)
+            ky = 0 if kx == 0 else ky
+            ky = min(ky, 15)
+            self._set_points([kx, ky, *end_nearest(kx, ky, *end)])
+        else:
+            self._set_points([x1, y1, *end_toward(x1, y1, *self._from_canvas_f(e.x, e.y))])
 
     def _set_curve(self, curve):
         self.curve = {ch: list(curve[ch]) for ch in CHANNELS}
@@ -651,6 +955,13 @@ class App:
             if self.gen_idx is None:
                 raise ValueError(f"generator frame unavailable: {self.gen_error}")
             return self.gen_idx
+        if self.source.get() == "effect":
+            name = self.effect.get()
+            params = self.effect_params[name]
+            key = (name, int(self.frame_scale.get()), tuple(sorted(params.items())))
+            if self._effect_idx[0] != key:
+                self._effect_idx = (key, index_image_from_effect(name, key[1], params))
+            return self._effect_idx[1]
         if not self.clips:
             raise ValueError("no current-geometry .seg clips found in the repo root")
         path, _ = self.clips[self.clip_box.current()]
@@ -679,24 +990,32 @@ class App:
             c.create_line(*[v for p in pts for v in p], fill=col, width=width)
             for px, py in pts:
                 c.create_oval(px - 2, py - 2, px + 2, py + 2, fill=col, outline=col)
-        # The other channels' knee and second point, faded and dashed, so
-        # it's clear where they sit without looking grabbable. Drawn first,
-        # so the edited channel's handles land on top where they coincide.
+        # The other channels' knee and end, faded and dashed, so it's clear
+        # where they sit without looking grabbable. Drawn first, so the
+        # edited channel's handles land on top where they coincide.
         for ch in CHANNELS:
             if ch == active:
                 continue
-            x1, y1, x2, y2 = self.curve[ch]
-            for x, y in ((x1, y1), (x2, y2)):
+            pts = self.curve[ch]
+            for x, y in (pts[:2], curve_end(*pts)):
                 cx, cy = self._to_canvas(x, y)
                 c.create_rectangle(cx - 5, cy - 5, cx + 5, cy + 5,
                                    outline=_faded(CH_COLOURS[ch]), width=2, dash=(2, 2))
-        # Handles for the channel being edited: the knee and the second point.
-        x1, y1, x2, y2 = self.curve[active]
-        for (x, y), label in (((x1, y1), "knee"), ((x2, y2), "")):
+        # The start: fixed at black, because index 0 is also the background
+        # (rule 1), so it's a dot, not a handle.
+        sx, sy = self._to_canvas(0, 0)
+        c.create_oval(sx - 4, sy - 4, sx + 4, sy + 4, fill="#777777", outline="#777777")
+        c.create_text(sx + 8, sy - 6, text="start", anchor="sw", fill="#777777")
+        # Handles for the channel being edited: the knee, and the end --
+        # where the line meets the edge, not the stored through-point.
+        pts = self.curve[active]
+        for (x, y), label, where in ((pts[:2], "knee", "below"), (curve_end(*pts), "end", "left")):
             cx, cy = self._to_canvas(x, y)
             c.create_rectangle(cx - 6, cy - 6, cx + 6, cy + 6, outline=CH_COLOURS[active], width=2)
-            if label:
+            if where == "below":
                 c.create_text(cx + 10, cy + 10, text=label, anchor="nw", fill=CH_COLOURS[active])
+            else:
+                c.create_text(cx - 10, cy + 10, text=label, anchor="ne", fill=CH_COLOURS[active])
 
     def refresh(self):
         try:

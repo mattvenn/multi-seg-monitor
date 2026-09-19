@@ -224,6 +224,69 @@ def test_read_frame_bounds():
     raise AssertionError("read past the end of a clip")
 
 
+def test_curve_end_sits_on_the_edge_and_every_slope_is_reachable():
+    """The end handle is drawn on the plot's edge, and dragging it can reach
+    every second slope the chip can store -- including the ~11% (steep ones)
+    with no whole-number point on the edge."""
+    for x1 in range(15):
+        for y1 in range(16):
+            if x1 == 0 and y1:
+                continue
+            for m2, p in pb.slope_choices(x1, y1):
+                assert segments.curve_params(x1, y1, *p)[3] == m2
+                ex, ey = pb.curve_end(x1, y1, *p)
+                assert ex == 15 or ey == 15, (x1, y1, p, ex, ey)
+                # Aiming the drag straight at a slope's own end lands on it.
+                got = pb.end_toward(x1, y1, ex, ey)
+                assert segments.curve_params(x1, y1, *got)[3] == m2, (x1, y1, p, got)
+    # And every built-in preset keeps its colours when its end is re-picked.
+    for preset in segments.PRESETS:
+        for ch in "rgb":
+            x1, y1, x2, y2 = preset[ch]
+            again = pb.end_nearest(x1, y1, *pb.curve_end(x1, y1, x2, y2))
+            assert segments.curve_params(x1, y1, *again) == segments.curve_params(x1, y1, x2, y2)
+
+
+def test_effect_index_image_matches_attract_proto():
+    """The builder evaluates an effect over the whole frame as numpy arrays;
+    attract_proto.sample() is the scalar reference. They must agree segment
+    for segment, at the defaults and at an arbitrary legal setting."""
+    import attract_proto
+
+    rng = random.Random(3)
+    for name, spec in attract_proto.PARAMS.items():
+        settings = [attract_proto.default_params(name),
+                    {key: rng.randint(lo, hi) for key, lo, hi, _d, _h in spec}]
+        for params in settings:
+            frame = rng.randrange(pb.EFFECT_FRAMES)
+            idx = pb.index_image_from_effect(name, frame, params)
+            ref = attract_proto.sample(attract_proto.EFFECTS[name](frame, **params), per_digit=False)
+            for _ in range(200):
+                row, col, seg = rng.randrange(segments.ROWS), rng.randrange(segments.COLS), rng.randrange(8)
+                x, y = segments.segment_centre(col, row, seg)
+                assert idx[y, x] == ref[row][col][seg], (name, params, row, col, seg)
+            assert idx.max() <= 15
+            mask, _ = pb._segment_tables()
+            off = np.ones(pb.HEIGHT * pb.WIDTH, dtype=bool)
+            off[mask] = False
+            assert not idx.ravel()[off].any(), f"{name} lit a background pixel"
+
+
+def test_effect_param_defaults_are_in_range():
+    import attract_proto
+
+    for name, spec in attract_proto.PARAMS.items():
+        for key, lo, hi, default, help_text in spec:
+            assert lo <= default <= hi, (name, key)
+            assert help_text
+        # The function's own defaults are the PARAMS defaults, so the CLI,
+        # the builder's Defaults button and a bare call all agree.
+        import inspect
+
+        sig = inspect.signature(attract_proto.EFFECTS[name]).parameters
+        assert {k: v.default for k, v in sig.items() if k != "frame"} == attract_proto.default_params(name), name
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

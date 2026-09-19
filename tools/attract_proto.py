@@ -11,7 +11,12 @@ comes once an effect is chosen and this becomes its reference model.
     ./attract_proto.py plasma --palette 2 --frames 240
     ./attract_proto.py ca --stride 4 --frames 300 # long timescales, sped up
     ./attract_proto.py zoneplate --per-digit      # one level per digit, not per segment
+    ./attract_proto.py plasma --param folds=3 --param speed=64 --mp4
     ./attract_proto.py all
+
+plasma, zoneplate and interference take tuning parameters (PARAMS below);
+tools/palette_builder/palette_builder.py shows them live, with a slider each,
+and prints the --param string for the setting on screen.
 
 Coordinates are screen pixels relative to the grid's top-left: a segment is
 sampled at its centre, so there are 6 distinct x positions per digit (f/e, a/g/d,
@@ -27,8 +32,6 @@ import argparse
 import os
 import subprocess
 
-from PIL import Image
-
 import segments
 
 WIDTH, HEIGHT = 800, 600
@@ -41,10 +44,25 @@ SEG_CY = [(s[3] + s[4]) // 2 for s in segments.SEGMENTS]
 
 
 def tri(v, bits):
-    """Triangle wave: the low `bits` of v folded to `bits-1` bits (0..2^(bits-1)-1)."""
+    """Triangle wave: the low `bits` of v folded to `bits-1` bits (0..2^(bits-1)-1).
+
+    Written without a branch -- XOR with all-ones when the top bit is set --
+    which is also exactly the hardware: `bits-1` XOR gates. It works unchanged
+    on numpy arrays, which is how palette_builder evaluates a whole frame in one
+    call.
+    """
     half = 1 << (bits - 1)
-    v &= (1 << bits) - 1
-    return v if v < half else (1 << bits) - 1 - v
+    v = v & ((1 << bits) - 1)
+    return (v ^ ((v >> (bits - 1)) * ((1 << bits) - 1))) & (half - 1)
+
+
+def _max(a, b):
+    return (a + b + abs(a - b)) >> 1  # exact for integers, scalar or array
+
+
+def _min(a, b):
+    return (a + b - abs(a - b)) >> 1
+
 
 
 def lfsr16(v):
@@ -57,13 +75,51 @@ def lfsr16(v):
     return v
 
 
-def dist_approx(dx, dy):
-    """Two-piece alpha-max-beta-min: max(hi, 7/8 hi + 1/2 lo). Within ~3% of
-    Euclidean -- round rings rather than the octagons max + lo/2 draws -- for
-    two shifts, two adds and a compare."""
+def dist_approx(dx, dy, roundness=2):
+    """Distance, at three costs. Any max-of-lines distance is a polygon: its
+    contours are straight between the kinks, and at ring sizes of hundreds of
+    pixels the kinks show as corners.
+
+    1: max(hi, 7/8 hi + lo/2) -- two lines per octant, so a 16-gon whose
+       second side spans ~31 degrees: reads as an octagon. Two adds.
+    2: max of four tangent lines, at 0, 15, 30 and 45 degrees -- a 24-gon,
+       within ~1%, and the corners are 15 degrees apart so they don't read.
+       Coefficients are shift-and-add (31/32, 1/4, 7/8, 1/2, 45/64).
+    3: exact, isqrt(dx^2 + dy^2): the squares the zone plate already builds
+       plus a 10-step serial square root (~30 flops, one bit per cycle, well
+       inside the ~40 spare cycles per byte).
+    """
     dx, dy = abs(dx), abs(dy)
-    hi, lo = max(dx, dy), min(dx, dy)
-    return max(hi, hi - (hi >> 3) + (lo >> 1))
+    if roundness >= 3:
+        return _isqrt(dx * dx + dy * dy)
+    hi, lo = _max(dx, dy), _min(dx, dy)
+    if roundness <= 1:
+        return _max(hi, hi - (hi >> 3) + (lo >> 1))
+    d = _max(hi, hi - (hi >> 5) + (lo >> 2))  # 15 degrees: 0.969, 0.25
+    d = _max(d, hi - (hi >> 3) + (lo >> 1))  # 30 degrees: 0.875, 0.5
+    return _max(d, ((hi + lo) * 45) >> 6)  # 45 degrees: 0.703 each
+
+
+def _isqrt(v):
+    if hasattr(v, "shape"):
+        import numpy as np
+
+        # Exact for the < 2^22 values here: a double's sqrt of a perfect
+        # square is exact, and of anything else is never rounded up past it.
+        return np.floor(np.sqrt(v.astype(np.float64))).astype(np.int64)
+    import math
+
+    return math.isqrt(v)
+
+
+def _lut(table, i):
+    """table[i] for a scalar or a numpy index array."""
+    if hasattr(i, "shape"):
+        import numpy as np
+
+        return np.asarray(table)[i]
+    return table[i]
+
 
 
 # ---------------------------------------------------------------------------
@@ -82,7 +138,7 @@ def dist_approx(dx, dy):
 RIP_K, RIP_P, RIP_SPEED, RIP_WL = 6, 192, 3, 16
 
 
-def ripples_frame(frame):
+def ripples_frame(frame, **_):
     drops = []
     for i in range(RIP_K):
         t = frame + i * (RIP_P // RIP_K)
@@ -114,74 +170,95 @@ def ripples_frame(frame):
 
 
 # ---------------------------------------------------------------------------
-# 2. Interference / zone plate
+# Tunable effects
 #
-# Two sources wander on Lissajous paths. Each contributes a phase of
-# (dx^2 + dy^2) >> k, which is the Fresnel zone plate: rings that tighten
-# outward. Note the sum of the two is algebraically a single zone plate centred
-# on the sources' midpoint (|p-a|^2 + |p-b|^2 = 2|p-m|^2 + const), so this is
-# not true interference -- that is `interference_slow` below, which sums
-# distances instead of squared distances.
+# Every parameter is an integer standing for something cheap in hardware -- a
+# shift amount, a small multiplier done as shift-and-add, a fold count -- so a
+# setting that looks right carries into Verilog as constants. PARAMS lists
+# (name, lo, hi, default, help); defaults are the slow, smooth versions, and the
+# first, faster prototype is reachable from the sliders (noted per effect).
+#
+# All three sample functions are straight-line integer maths, so they take
+# either Python ints or numpy arrays of x/y (see tri()).
+# ---------------------------------------------------------------------------
+
+
+def _sources(frame, drift):
+    """Two points wandering on triangle-wave Lissajous paths. `drift` 4 takes
+    about a minute to cross the screen; the four rates are 6:4:4:5 so the pair
+    never falls into step."""
+    ax = tri((frame * drift * 6) >> 4, 12) * GRID_W >> 11
+    ay = tri(((frame * drift * 4) >> 4) + 600, 12) * GRID_H >> 11
+    bx = tri(((frame * drift * 4) >> 4) + 1400, 12) * GRID_W >> 11
+    by = tri((frame * drift * 5) >> 4, 12) * GRID_H >> 11
+    return ax, ay, bx, by
+
+
+# ---------------------------------------------------------------------------
+# 2. Zone plate
+#
+# Each source contributes a phase of (dx^2 + dy^2) >> k: the Fresnel zone
+# plate, rings that tighten outward. With two sources the sum is algebraically
+# a *single* zone plate centred on their midpoint (|p-a|^2 + |p-b|^2 =
+# 2|p-m|^2 + const), so it never shows interference -- that is `interference`.
+# The phase carries 2 fractional bits, so the rings can creep by a quarter of a
+# brightness step per frame.
 #
 # Cost: squares built incrementally along the scan ((x+1)^2 = x^2 + 2x + 1), so
-# per source two ~20-bit accumulators plus an adder -- or reuse one adder
-# serially. Source positions are triangle waves of the frame counter. ~60 flops
-# if the squares are held per source; halve that by recomputing serially.
+# two ~20-bit accumulators and an adder per source, or one adder reused
+# serially. ~30-60 flops, 0 scratch.
+#
+# First prototype: ring_shift 9, drift 16, phase_speed 48.
 # ---------------------------------------------------------------------------
-ZP_SHIFT = 9
+ZONEPLATE_PARAMS = [
+    ("ring_shift", 8, 16, 13, "ring density: r^2 >> this; lower = more, finer rings"),
+    ("drift", 0, 32, 4, "how fast the sources wander"),
+    ("phase_speed", 0, 64, 2, "how fast the rings flow, in 1/16 brightness steps per frame"),
+    ("sources", 1, 2, 2, "one zone plate, or two (which look like one at their midpoint)"),
+]
 
 
-def zoneplate_frame(frame):
-    ax = tri(frame * 3, 11) * GRID_W >> 10
-    ay = tri(frame * 2 + 300, 11) * GRID_H >> 10
-    bx = tri(frame * 2 + 700, 11) * GRID_W >> 10
-    by = tri(frame * 5 + 100, 11) * GRID_H >> 10
-    t = frame * 3
+def zoneplate_frame(frame, ring_shift=13, drift=4, phase_speed=2, sources=2):
+    ax, ay, bx, by = _sources(frame, drift)
+    sh = ring_shift - 2
 
     def f(x, y):
-        pa = ((x - ax) ** 2 + (y - ay) ** 2) >> ZP_SHIFT
-        pb = ((x - bx) ** 2 + (y - by) ** 2) >> ZP_SHIFT
-        return tri(pa + pb - t, 5)
+        p = ((x - ax) ** 2 + (y - ay) ** 2) >> sh
+        if sources == 2:
+            p = p + (((x - bx) ** 2 + (y - by) ** 2) >> sh)
+        return tri(p - ((frame * phase_speed) >> 2), 7) >> 2
 
     return f
 
 
-# Slow variant: rings four times as far apart in r^2 (fewer of them, so the
-# corners alias less against the segment pitch),
-# sources that take ~1 minute to cross the screen, and the ring phase carried
-# with 2 fractional bits so it creeps a quarter of a brightness step per frame
-# instead of jumping. Same hardware as above plus 2 bits of phase.
-ZPS_SHIFT = 11
+# ---------------------------------------------------------------------------
+# 3. Interference
+#
+# Sum (or difference) of *distances*, not squared distances, so rings stay
+# evenly spaced -- nothing on screen is finer than the segment pitch -- and the
+# pair makes the ellipses of two stones dropped in a pond (sum) or the
+# hyperbolic nodal lines of a two-slit pattern (difference). Distance via
+# dist_approx: no multiplier and no squarer, cheaper than the zone plate.
+#
+# Cost: two dist_approx (or one, serially), an adder, the fold. ~25 flops.
+# ---------------------------------------------------------------------------
+INTERFERENCE_PARAMS = [
+    ("ring_spacing", 0, 7, 5, "a ring every 16 * 2^k px of summed distance"),
+    ("drift", 0, 32, 3, "how fast the sources wander"),
+    ("phase_speed", 0, 64, 2, "how fast the rings flow, in 1/16 brightness steps per frame"),
+    ("mode", 0, 1, 1, "0 = sum of distances (ellipses), 1 = difference (hyperbolas)"),
+    ("roundness", 1, 3, 3, "distance: 1 = 2 lines (octagonal), 2 = 4 lines (24-gon), 3 = exact sqrt"),
+]
 
 
-def zoneplate_slow_frame(frame):
-    ax = tri(frame * 3 >> 1, 12) * GRID_W >> 11
-    ay = tri(frame + 600, 12) * GRID_H >> 11
-    bx = tri(frame + 1400, 12) * GRID_W >> 11
-    by = tri(frame * 5 >> 2, 12) * GRID_H >> 11
-
-    def f(x, y):
-        pa = ((x - ax) ** 2 + (y - ay) ** 2) >> (ZPS_SHIFT - 2)
-        pb = ((x - bx) ** 2 + (y - by) ** 2) >> (ZPS_SHIFT - 2)
-        return tri(pa + pb - frame, 7) >> 2
-
-    return f
-
-
-# True two-source interference: sum of *distances*, not squared distances, so
-# rings stay evenly spaced (no aliasing anywhere on screen) and the pair forms
-# the ellipse-and-hyperbola pattern of two stones dropped in a pond. Distance
-# via dist_approx, so no multiplier and no squarer at all -- cheaper than the
-# zone plate. Slow sources and 2 fractional phase bits, as above.
-def interference_slow_frame(frame):
-    ax = tri(frame * 3 >> 1, 12) * GRID_W >> 11
-    ay = tri(frame + 600, 12) * GRID_H >> 11
-    bx = tri(frame + 1400, 12) * GRID_W >> 11
-    by = tri(frame * 5 >> 2, 12) * GRID_H >> 11
+def interference_frame(frame, ring_spacing=5, drift=3, phase_speed=2, mode=1, roundness=3):
+    ax, ay, bx, by = _sources(frame, drift)
 
     def f(x, y):
-        d = dist_approx(x - ax, y - ay) + dist_approx(x - bx, y - by)
-        return tri((d << 1) - frame, 7) >> 2  # a ring per 64 px of summed distance
+        da = dist_approx(x - ax, y - ay, roundness)
+        db = dist_approx(x - bx, y - by, roundness)
+        d = da - db if mode else da + db
+        return tri(((d << 3) >> ring_spacing) - ((frame * phase_speed) >> 2), 7) >> 2
 
     return f
 
@@ -190,63 +267,79 @@ def interference_slow_frame(frame):
 # 4. Plasma
 #
 # The demoscene classic: a sum of sines of x, y, x+y and a moving radial term,
-# folded to 4 bits. One 64-entry sine (a 16-entry quarter-wave table, 4 bits
-# out), looked up four times per sample.
+# folded to 4 bits. One 256-step sine with 6-bit output (a 64-entry
+# quarter-wave table), looked up four times per sample.
 #
-# Cost: 16x4 ROM, a 6-bit phase adder, a 6-bit accumulator, serial x4. The
-# radial term reuses dist_approx. ~15 flops, 0 scratch.
+# Resolution matters more than it looks. The first version used a 64-step,
+# 4-bit sine: at x >> 4 each term's phase only moved every 16 px, so every term
+# was a staircase, and the diagonal term's steps crossing the others' drew
+# jagged triangles all over the screen. A 256-step phase moves every 4 px at
+# the same scale, and 6-bit terms keep the folded sum smooth.
+#
+# The shifts keep their meaning from that version (sin(x >> k) at 64 steps per
+# cycle is the same wavelength as sin((x << 2) >> k) at 256). Time is
+# frame * speed in 1/65536 of a cycle; the four terms run at 1, 3/2, 5/2 and 2
+# times that, non-harmonic so the pattern doesn't visibly repeat.
+#
+# Cost: 64x6 ROM, an 8-bit phase adder, an 8-bit accumulator, serial x4. The
+# radial term reuses dist_approx. ~20 flops, 0 scratch.
+#
+# First prototype: shifts 3/3/4/2, speed 1024 (off the slider), folds 2,
+# wobble 24 (at the old
+# 64-step, 4-bit resolution, so it was also jaggier).
 # ---------------------------------------------------------------------------
-_QSIN = [round(7.5 + 7.5 * __import__("math").sin(i * 3.14159265 / 32)) for i in range(16)]
+_QSIN = [round(31.5 + 31.5 * __import__("math").sin((i + 0.5) * 3.14159265 / 128)) for i in range(64)]
 
 
-def sin64(p):
-    """4-bit sine of a 6-bit phase, from a 16-entry quarter-wave table."""
-    p &= 63
-    q, i = p >> 4, p & 15
+def _sin256_scalar(p):
+    """Quarter-wave symmetry: 64 stored entries cover the whole cycle."""
+    q, i = p >> 6, p & 63
     if q == 0:
         return _QSIN[i]
     if q == 1:
-        return _QSIN[15 - i] if i else 15
+        return _QSIN[63 - i]
     if q == 2:
-        return 15 - _QSIN[i]
-    return 15 - (_QSIN[15 - i] if i else 15)
+        return 63 - _QSIN[i]
+    return 63 - _QSIN[63 - i]
 
 
-def plasma_frame(frame):
-    t = frame
-    cx = GRID_W // 2 + (sin64(t >> 1) - 8) * 24
-    cy = GRID_H // 2 + (sin64((t >> 1) + 16) - 8) * 18
+SIN256 = tuple(_sin256_scalar(p) for p in range(256))
+
+
+def sin256(p):
+    """6-bit sine (0..63) of an 8-bit phase."""
+    return _lut(SIN256, p & 255)
+
+
+PLASMA_PARAMS = [
+    ("x_shift", 1, 7, 4, "horizontal term wavelength: 2^k * 64 px / 4; lower = tighter"),
+    ("y_shift", 1, 7, 4, "vertical term wavelength, likewise"),
+    ("diag_shift", 1, 7, 5, "diagonal (x + y) term wavelength"),
+    ("radial_shift", 1, 7, 3, "radial term ring spacing"),
+    ("speed", 0, 255, 50, "time, in 1/65536 of a cycle per frame; 50 = a cycle in ~22 s"),
+    ("folds", 1, 4, 2, "folds of the summed sines into 0..15: more = more contour bands"),
+    ("wobble", 0, 32, 24, "how far the radial term's centre wanders"),
+]
+
+
+def plasma_frame(frame, x_shift=4, y_shift=4, diag_shift=5, radial_shift=3, speed=50, folds=2, wobble=24):
+    t = frame * speed
+    cx = GRID_W // 2 + (((sin256(t >> 10) - 32) * wobble) >> 2)
+    cy = GRID_H // 2 + (((sin256((t >> 10) + 64) - 32) * wobble * 3) >> 4)
 
     def f(x, y):
-        s = sin64((x >> 3) + t)
-        s += sin64((y >> 3) - (t >> 1) * 3)
-        s += sin64(((x + y) >> 4) + 2 * t)
-        s += sin64((dist_approx(x - cx, y - cy) >> 2) - t)
-        # The sum of four sines clusters around 30, so one fold of 0..60
-        # would sit near full brightness everywhere; folding twice spends
-        # the whole 0..15 range on the part of the sum that actually moves.
-        return tri(s, 5)
+        s = sin256(((x << 2) >> x_shift) + (t >> 8))
+        s = s + sin256(((y << 2) >> y_shift) - ((t * 3) >> 9))
+        s = s + sin256((((x + y) << 2) >> diag_shift) + ((t * 5) >> 9))
+        s = s + sin256(((dist_approx(x - cx, y - cy) << 2) >> radial_shift) - (t >> 7))
+        # The sum of four sines (0..252) clusters around the middle, so one
+        # fold spends most of 0..15 near full brightness; two spends it on
+        # the part of the sum that actually moves. Three and four draw
+        # contour bands.
+        return tri(s, 9 - folds) >> (4 - folds)
 
     return f
 
-
-# Slow variant: half the spatial frequency (blobs twice the size) and time
-# carried with 3 fractional bits, so each term's phase steps once every few
-# frames rather than every frame. The sine table is unchanged; the 4 terms
-# drift at different, non-harmonic rates so the pattern never visibly repeats.
-def plasma_slow_frame(frame):
-    t = frame  # phase units of 1/8 of a table step
-    cx = GRID_W // 2 + (sin64(t >> 5) - 8) * 24
-    cy = GRID_H // 2 + (sin64((t >> 5) + 16) - 8) * 18
-
-    def f(x, y):
-        s = sin64((x >> 4) + (t >> 3))
-        s += sin64((y >> 4) - (t * 3 >> 4))
-        s += sin64(((x + y) >> 5) + (t * 5 >> 4))
-        s += sin64((dist_approx(x - cx, y - cy) >> 3) - (t >> 2))
-        return tri(s, 5)
-
-    return f
 
 
 # ---------------------------------------------------------------------------
@@ -344,12 +437,26 @@ SEG7 = [0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07]  # src/seg7_rom.v, 0-7
 EFFECTS = {
     "ripples": ripples_frame,
     "zoneplate": zoneplate_frame,
+    "interference": interference_frame,
     "plasma": plasma_frame,
-    "zoneplate_slow": zoneplate_slow_frame,
-    "interference_slow": interference_slow_frame,
-    "plasma_slow": plasma_slow_frame,
     "ca": None,  # per-digit, handled specially
 }
+
+# The tunable ones -- what palette_builder offers, with its sliders.
+PARAMS = {
+    "plasma": PLASMA_PARAMS,
+    "zoneplate": ZONEPLATE_PARAMS,
+    "interference": INTERFERENCE_PARAMS,
+}
+
+
+def default_params(name):
+    return {p[0]: p[3] for p in PARAMS.get(name, [])}
+
+
+def param_args(params):
+    """The CLI spelling of a parameter set, for copying out of the builder."""
+    return " ".join(f"--param {k}={v}" for k, v in params.items())
 
 
 def sample(f, per_digit):
@@ -380,6 +487,8 @@ def gif_palette(palette, levels):
 
 
 def draw(levels, pal):
+    from PIL import Image  # only the renderer needs it; palette_builder doesn't
+
     im = Image.new("P", (WIDTH, HEIGHT), 0)
     im.putpalette(pal)
     px = im.load()
@@ -395,7 +504,24 @@ def draw(levels, pal):
     return im
 
 
+def parse_params(name, pairs):
+    params = default_params(name)
+    spec = {p[0]: p for p in PARAMS.get(name, [])}
+    for pair in pairs:
+        key, _, val = pair.partition("=")
+        if key not in spec:
+            raise SystemExit(f"{name} has no parameter {key!r} (has: {', '.join(params) or 'none'})")
+        v = int(val)
+        if not spec[key][1] <= v <= spec[key][2]:
+            raise SystemExit(f"{key}={v} is outside {spec[key][1]}..{spec[key][2]}")
+        params[key] = v
+    return params
+
+
 def run(name, args):
+    params = parse_params(name, args.param if args.effect != "all" else [])
+    if params:
+        print(f"{name}: {param_args(params)}")
     pal = gif_palette(args.palette, args.levels)
     frames = []
     ca = CA() if name == "ca" else None
@@ -404,7 +530,7 @@ def run(name, args):
         if ca:
             lv = ca_levels(ca.frame(fr))
         else:
-            lv = sample(EFFECTS[name](fr), args.per_digit)
+            lv = sample(EFFECTS[name](fr, **params), args.per_digit)
         frames.append(draw(lv, pal))
     tag = f"{name}{'_digit' if args.per_digit else ''}_p{args.palette}"
     if args.levels == 4:
@@ -444,6 +570,8 @@ def main():
     ap.add_argument("--per-digit", action="store_true")
     ap.add_argument("--out", default="attract_out")
     ap.add_argument("--mp4", action="store_true", help="60 fps H.264 via ffmpeg instead of a GIF")
+    ap.add_argument("--param", action="append", default=[], metavar="NAME=VALUE",
+                    help="set a tuning parameter (repeatable); see PARAMS per effect")
     args = ap.parse_args()
     for name in EFFECTS if args.effect == "all" else [args.effect]:
         run(name, args)
