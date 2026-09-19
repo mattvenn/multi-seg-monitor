@@ -39,6 +39,12 @@ override with `TT_TOOLS=`.
     make -C test gold               # rewrite the gold images after an intended change
     tools/palette_builder/palette_builder.py              # design palettes (needs Tk + numpy)
     tools/palette_builder/palette_builder.py --write-rtl  # regenerate src/palette_presets.v
+    git config core.hooksPath .githooks                   # once per clone: enables the pre-commit hook
+
+`.githooks/pre-commit` refuses a commit whose staged `presets.json` and
+`src/palette_presets.v` disagree (it runs `tools/test_palettes.py` on the staged
+files). It only runs when one of the palette files is staged. `git commit
+--no-verify` skips it deliberately.
 
 Prefer `SIM=verilator` for the frame-capture tests and `gold` specifically --
 icarus takes 1-4 minutes per frame-capture test, verilator ~35-55s for the

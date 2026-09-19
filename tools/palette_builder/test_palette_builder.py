@@ -148,24 +148,6 @@ def test_fit_curve_on_the_old_tables_is_close():
         assert worst <= 1, (name, worst)
 
 
-def test_gradient_endpoints_and_spacing():
-    pal = pb.gradient_palette(["#000000", "#ffffff"])
-    assert pal[0] == (0, 0, 0)  # entry 0 stays black no matter the stops
-    assert pal[1] == (0, 0, 0) and pal[15] == (15, 15, 15)
-    assert all(pal[i][0] <= pal[i + 1][0] for i in range(1, 15))  # monotonic ramp
-    three = pb.gradient_palette(["#ff0000", "#00ff00", "#0000ff"])
-    assert three[1] == (15, 0, 0) and three[8] == (0, 15, 0) and three[15] == (0, 0, 15)
-
-
-def test_gradient_rejects_bad_input():
-    for bad in ([], ["#fff"], ["red", "blue"], ["#ff0000"]):
-        try:
-            pb.gradient_palette(bad)
-        except ValueError:
-            continue
-        raise AssertionError(f"accepted {bad}")
-
-
 def test_json_round_trip_and_validation():
     curve = {ch: list(segments.PRESETS[7][ch]) for ch in "rgb"}
     assert pb.from_json(pb.to_json(curve, "x")) == (curve, False)

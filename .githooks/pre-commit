@@ -1,0 +1,34 @@
+#!/bin/sh
+#
+# Refuse a commit that leaves the palette presets out of sync:
+# tools/palette_builder/presets.json is the source of truth and
+# src/palette_presets.v is generated from it (palette_builder.py --write-rtl).
+# CI's "Run palette tests" step catches the same thing, ~20 minutes later.
+#
+# Runs tools/test_palettes.py against the *staged* versions of the files
+# involved, copied out of the index into a scratch tree -- not the working
+# tree -- so a half-staged change is judged exactly as it will be committed.
+#
+# Enabled per clone with:  git config core.hooksPath .githooks
+# Skip once, deliberately: git commit --no-verify
+
+FILES="tools/palette_builder/presets.json src/palette_presets.v tools/segments.py
+tools/test_palettes.py firmware/seg_player.py firmware/gen_mode.py"
+
+# Only when one of them is part of this commit.
+staged=$(git diff --cached --name-only --diff-filter=ACMR -- $FILES)
+[ -z "$staged" ] && exit 0
+
+tmp=$(mktemp -d) || exit 1
+trap 'rm -rf "$tmp"' EXIT
+# shellcheck disable=SC2086
+git checkout-index --prefix="$tmp/" -- $FILES || exit 1
+
+if ! out=$(cd "$tmp/tools" && python3 test_palettes.py 2>&1); then
+    echo "pre-commit: palette tests fail on the staged files:" >&2
+    echo "$out" | tail -5 >&2
+    echo >&2
+    echo "If presets.json changed, run tools/palette_builder/palette_builder.py --write-rtl" >&2
+    echo "and stage src/palette_presets.v too." >&2
+    exit 1
+fi

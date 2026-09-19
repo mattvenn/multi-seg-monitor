@@ -239,34 +239,6 @@ def fit_curve(table):
     return curve
 
 
-_HEX = re.compile(r"^#[0-9a-fA-F]{6}$")
-
-
-def gradient_palette(stops):
-    """Colour stops ('#rrggbb', at least two) spread evenly over entries 1-15,
-    linearly interpolated.  Entry 0 stays black.  8-bit stops are quantised to
-    the palette's 4 bits. A table, not a curve: fit_curve() it to use it."""
-    if len(stops) < 2:
-        raise ValueError("a gradient needs at least two colour stops")
-    cols = []
-    for s in stops:
-        if not _HEX.match(s):
-            raise ValueError(f"{s!r} is not a #rrggbb colour")
-        cols.append(tuple(int(s[i : i + 2], 16) / 17 for i in (1, 3, 5)))
-    pal = [(0, 0, 0)]
-    for i in range(1, 16):
-        pos = (i - 1) / 14 * (len(cols) - 1)
-        lo = min(int(pos), len(cols) - 2)
-        t = pos - lo
-        pal.append(
-            tuple(
-                min(15, int(cols[lo][ch] * (1 - t) + cols[lo + 1][ch] * t + 0.5))
-                for ch in range(3)
-            )
-        )
-    return pal
-
-
 def to_json(curve, name):
     return json.dumps({"name": name, **{ch: list(curve[ch]) for ch in CHANNELS}}, indent=1)
 
@@ -356,6 +328,13 @@ PAD = 24
 CH_COLOURS = {"r": "#d32f2f", "g": "#2e7d32", "b": "#1565c0"}
 
 
+def _faded(colour, amount=0.6):
+    """`colour` mixed `amount` of the way to white -- Tk's canvas has no
+    alpha, so this is how the unselected channels' handles fade back."""
+    rgb = [int(colour[i : i + 2], 16) for i in (1, 3, 5)]
+    return "#" + "".join(f"{round(v + (255 - v) * amount):02x}" for v in rgb)
+
+
 class App:
     def __init__(self, root):
         import tkinter as tk
@@ -375,7 +354,6 @@ class App:
         self.source = tk.StringVar(value="generator")
         self.bits = tk.IntVar(value=12)
         self.name = tk.StringVar(value="custom")
-        self.stops = tk.StringVar(value="#0000ff #00ffff #ffffff")
         self.slot = tk.IntVar(value=0)
         self.point_vars = [tk.IntVar() for _ in range(4)]
 
@@ -442,24 +420,20 @@ class App:
                 row=n // 4, column=n % 4
             )
 
-        grad = ttk.LabelFrame(left, text="Fit to a gradient over entries 1-15", padding=4)
-        grad.grid(row=5, column=0, sticky="ew", pady=(8, 0))
-        ttk.Entry(grad, textvariable=self.stops, width=30).grid(row=0, column=0)
-        ttk.Button(grad, text="Fit", command=self._apply_gradient).grid(row=0, column=1)
-
         io = ttk.LabelFrame(left, text="Save / export", padding=4)
-        io.grid(row=6, column=0, sticky="ew", pady=(8, 0))
+        io.grid(row=5, column=0, sticky="ew", pady=(8, 0))
         ttk.Entry(io, textvariable=self.name, width=14).grid(row=0, column=0)
         ttk.Button(io, text="Save", width=6, command=self._save).grid(row=0, column=1)
         ttk.Button(io, text="Open...", width=7, command=self._open).grid(row=0, column=2)
         ttk.Button(io, text="Export", width=7, command=self._export).grid(row=0, column=3)
 
         chip = ttk.LabelFrame(left, text="Chip presets (presets.json -> src/)", padding=4)
-        chip.grid(row=7, column=0, sticky="ew", pady=(8, 0))
+        chip.grid(row=6, column=0, sticky="ew", pady=(8, 0))
         ttk.Label(chip, text="slot").grid(row=0, column=0)
         ttk.Spinbox(chip, from_=0, to=segments.N_PRESETS - 1, width=3, textvariable=self.slot).grid(row=0, column=1)
-        ttk.Button(chip, text="Save to slot", command=self._save_slot).grid(row=0, column=2)
-        ttk.Button(chip, text="Write RTL", command=self._write_rtl).grid(row=0, column=3)
+        ttk.Button(chip, text="Load from slot", command=self._load_slot).grid(row=0, column=2)
+        ttk.Button(chip, text="Save to slot", command=self._save_slot).grid(row=0, column=3)
+        ttk.Button(chip, text="Write RTL", command=self._write_rtl).grid(row=0, column=4)
 
         top = ttk.Frame(right)
         top.grid(row=0, column=0, sticky="w")
@@ -613,12 +587,6 @@ class App:
         self.name.set(segments.PRESETS[n]["name"])
         self.slot.set(n)
 
-    def _apply_gradient(self):
-        try:
-            self._set_curve(fit_curve(gradient_palette(re.split(r"[\s,]+", self.stops.get().strip()))))
-        except ValueError as e:
-            self._say(f"gradient: {e}", bad=True)
-
     def _save(self):
         name = safe_name(self.name.get())
         PALETTE_DIR.mkdir(exist_ok=True)
@@ -655,8 +623,22 @@ class App:
         save_preset(self.curve, slot, safe_name(self.name.get()))
         self._say(
             f"saved to presets.json slot {slot} -- press Write RTL to regenerate "
-            "src/palette_presets.v (restart the builder to see it in the preset buttons)"
+            "src/palette_presets.v (Load from slot reads it back; the preset buttons "
+            "above keep the file as it was at startup)"
         )
+
+    def _load_slot(self):
+        # From disk, not segments.PRESETS: that was read at import, so it
+        # misses anything saved to a slot since the builder started.
+        slot = int(self.slot.get())
+        try:
+            preset = segments.load_presets()[slot]
+            self._set_curve(preset)
+        except (OSError, ValueError, KeyError, IndexError) as e:
+            self._say(f"load slot {slot}: {e}", bad=True)
+            return
+        self.name.set(preset["name"])
+        self._say(f"loaded presets.json slot {slot} ({preset['name']})")
 
     def _write_rtl(self):
         path = write_rtl()
@@ -697,6 +679,17 @@ class App:
             c.create_line(*[v for p in pts for v in p], fill=col, width=width)
             for px, py in pts:
                 c.create_oval(px - 2, py - 2, px + 2, py + 2, fill=col, outline=col)
+        # The other channels' knee and second point, faded and dashed, so
+        # it's clear where they sit without looking grabbable. Drawn first,
+        # so the edited channel's handles land on top where they coincide.
+        for ch in CHANNELS:
+            if ch == active:
+                continue
+            x1, y1, x2, y2 = self.curve[ch]
+            for x, y in ((x1, y1), (x2, y2)):
+                cx, cy = self._to_canvas(x, y)
+                c.create_rectangle(cx - 5, cy - 5, cx + 5, cy + 5,
+                                   outline=_faded(CH_COLOURS[ch]), width=2, dash=(2, 2))
         # Handles for the channel being edited: the knee and the second point.
         x1, y1, x2, y2 = self.curve[active]
         for (x, y), label in (((x1, y1), "knee"), ((x2, y2), "")):
