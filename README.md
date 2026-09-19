@@ -254,6 +254,31 @@ over the 640x480 mode's 6240 bytes (`resolution_discussion.md` §11), so the sam
 flash now holds about 17 seconds at 24 fps rather than 26 — existing `.seg` files
 predate the frame size change and need regenerating, not reusing.
 
+### Choosing the Pmod and palette
+
+`firmware/seg_player.py` (streaming) and `firmware/gen_mode.py` (internal generator)
+both take the choice as arguments to `main()`:
+
+| Argument | Values |
+|---|---|
+| `pmod_type` | 0 = Digilent PmodVGA, 1 = Tiny VGA Pmod |
+| `palette` | 0 grey, 1 blue, 2 green, 3 purple, 4 amber, 5 red, 6 cyan, 7 fire |
+| `curve` | optional custom palette, overriding `palette`: three `(x1, y1, x2, y2)` point pairs for R, G, B, as `tools/palette_builder`'s Export prints |
+| `cycle` | `gen_mode.py` only: `True` (the default) steps through all 8 presets every ~4 s |
+
+`mpremote run firmware/seg_player.py` calls `main()` with its defaults, so to choose,
+copy the file across once and call it yourself:
+
+    mpremote cp firmware/seg_player.py :
+    mpremote exec "import seg_player; seg_player.main(pmod_type=0, palette=4)"
+
+    mpremote cp firmware/gen_mode.py :
+    mpremote exec "import gen_mode; gen_mode.main(pmod_type=0, curve=((1, 0, 8, 15), (1, 0, 15, 10), (10, 0, 15, 5)))"
+
+Or edit the `main()` call at the bottom of the file and keep using `mpremote run`.
+`pmod_type` and `palette` go in as the reset strap; `curve` and `cycle` are sent as a
+config packet after reset, before any pixels (see "Config packet" above).
+
 The chip has no framebuffer, so the player re-pushes every displayed frame at 60.3 Hz
 (≈571 kB/s) regardless of the video's own rate. Pacing is free: a digit row is 16
 scanlines and 256 bytes, so one byte every 66 pixel clocks tracks the raster exactly,
