@@ -1,0 +1,27 @@
+name: formal
+on: [push, workflow_dispatch]
+jobs:
+  formal:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6
+
+      # sby, yosys and the smtbmc solvers, same suite as local development.
+      - name: Install oss-cad-suite
+        uses: YosysHQ/setup-oss-cad-suite@v3
+
+      # Every proof in `make formal`'s `all`. Two of them once stopped
+      # building unnoticed, because nothing ran them: each .sby
+      # lists the core's files by hand, and a new module wasn't added.
+      # -k so one failing proof doesn't hide the rest; sby exits non-zero on
+      # FAIL and ERROR alike, so the job fails on either.
+      - name: Run proofs
+        run: make -k -C formal all
+
+      - name: Upload proof logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: formal-logs
+          path: formal/*/logfile.txt
