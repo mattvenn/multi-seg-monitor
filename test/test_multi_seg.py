@@ -60,6 +60,25 @@ async def reset(dut, strap=0):
     await ClockCycles(dut.clk, 1)
 
 
+async def capture_frame(dut):
+    """Capture one whole frame to frame.ppm, as soon as it is safe to.
+
+    Counted in vsync edges rather than a fixed number of clock cycles, so it
+    costs about 2 frames instead of the 5 this used to budget: one vsync for
+    the generator or host to get into step, then tb.v opens the file on the
+    next vsync and closes it on the one after. dump_en goes up a little after
+    an edge, not on it, so that edge can't race the testbench into opening
+    early. Callers that start a host or send a config packet first do so
+    before calling this, so the captured frame is still the second one after
+    the first vsync -- the same picture the gold images were taken from."""
+    await FallingEdge(dut.vs)
+    await ClockCycles(dut.clk, 100)
+    dut.dump_en.value = 1
+    await FallingEdge(dut.vs)  # tb.v opens frame.ppm on this edge
+    await FallingEdge(dut.vs)  # ...and closes it on this one
+    await ClockCycles(dut.clk, 10)
+
+
 async def cycles_between_falls(sig):
     await FallingEdge(sig)
     t0 = get_sim_time("ps")
@@ -129,9 +148,7 @@ async def test_render_frame(dut):
     await reset(dut)
 
     # Let the generator get ahead of the raster before capturing.
-    await ClockCycles(dut.clk, 2 * H_TOTAL * V_TOTAL)
-    dut.dump_en.value = 1
-    await ClockCycles(dut.clk, 3 * H_TOTAL * V_TOTAL)
+    await capture_frame(dut)
 
     width, height, px = read_ppm("frame.ppm")
     assert (width, height) == (H_ACTIVE, V_ACTIVE)
@@ -278,9 +295,7 @@ async def test_stream_frame(dut):
     cocotb.start_soon(host_stream(dut, frame, frames=7))
 
     # Let the host get into step, then capture.
-    await ClockCycles(dut.clk, 2 * H_TOTAL * V_TOTAL)
-    dut.dump_en.value = 1
-    await ClockCycles(dut.clk, 3 * H_TOTAL * V_TOTAL)
+    await capture_frame(dut)
 
     width, height, px = read_ppm("frame.ppm")
 
@@ -337,9 +352,7 @@ async def test_render_frame_tiny_vga(dut):
     cocotb.start_soon(Clock(dut.clk, CLK_PS, unit="ps").start())
     await reset(dut, strap=0b001)  # Tiny VGA, palette 0
 
-    await ClockCycles(dut.clk, 2 * H_TOTAL * V_TOTAL)
-    dut.dump_en.value = 1
-    await ClockCycles(dut.clk, 3 * H_TOTAL * V_TOTAL)
+    await capture_frame(dut)
 
     width, height, px = read_ppm("frame.ppm")
     assert (width, height) == (H_ACTIVE, V_ACTIVE)
@@ -357,9 +370,7 @@ async def test_render_frame_palette2(dut):
     cocotb.start_soon(Clock(dut.clk, CLK_PS, unit="ps").start())
     await reset(dut, strap=0b100)  # Digilent, palette 2
 
-    await ClockCycles(dut.clk, 2 * H_TOTAL * V_TOTAL)
-    dut.dump_en.value = 1
-    await ClockCycles(dut.clk, 3 * H_TOTAL * V_TOTAL)
+    await capture_frame(dut)
 
     width, height, px = read_ppm("frame.ppm")
     assert (width, height) == (H_ACTIVE, V_ACTIVE)
@@ -578,9 +589,7 @@ async def test_config_packet_loads_a_palette(dut):
         assert int(dut.user_project.core.cycle_en.value) == 0, "a packet without the cycle bit must stop cycling"
 
     # Same timing as test_render_frame, so it's the same generator frame.
-    await ClockCycles(dut.clk, 2 * H_TOTAL * V_TOTAL)
-    dut.dump_en.value = 1
-    await ClockCycles(dut.clk, 3 * H_TOTAL * V_TOTAL)
+    await capture_frame(dut)
 
     width, height, px = read_ppm("frame.ppm")
     check_remapped_gold(px, width, height, "generator.png", CUSTOM_CURVE)
@@ -603,9 +612,7 @@ async def test_custom_palette_survives_streaming(dut):
     cocotb.start_soon(host_stream(dut, make_test_frame(), frames=7))
 
     # Same timing as test_stream_frame, so it's the same streamed frame.
-    await ClockCycles(dut.clk, 2 * H_TOTAL * V_TOTAL)
-    dut.dump_en.value = 1
-    await ClockCycles(dut.clk, 3 * H_TOTAL * V_TOTAL)
+    await capture_frame(dut)
 
     # Pixels first: they're the check the gate-level run relies on.
     width, height, px = read_ppm("frame.ppm")
@@ -781,9 +788,7 @@ async def run_delay_case(dut, delay_us):
     cocotb.start_soon(host_stream(dut, frame, frames=7, delay_us=delay_us))
 
     # Let the host get into step, then capture.
-    await ClockCycles(dut.clk, 2 * H_TOTAL * V_TOTAL)
-    dut.dump_en.value = 1
-    await ClockCycles(dut.clk, 3 * H_TOTAL * V_TOTAL)
+    await capture_frame(dut)
 
     width, height, px = read_ppm("frame.ppm")
     wrong, stale, first_bad = analyse(px, width, frame)

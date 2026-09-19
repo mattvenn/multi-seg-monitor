@@ -35,7 +35,7 @@ override with `TT_TOOLS=`.
     make flash PORT=/dev/ttyACM4    # upload to the demoboard (needs tt-support-tools' venv)
 
     make -C test IHP_SRAM=1         # same suite against the IHP macro instead of an inferred array
-    make -C test delay-sweep        # vsync latency sweep, ~10 min under icarus, writes frame_delay_*.png
+    make -C test delay-sweep        # vsync latency sweep, ~5 min under icarus, writes frame_delay_*.png
     make -C test gold               # rewrite the gold images after an intended change
     tools/palette_builder/palette_builder.py              # design palettes (needs Tk + numpy)
     tools/palette_builder/palette_builder.py --write-rtl  # regenerate src/palette_presets.v
@@ -47,12 +47,14 @@ files). It only runs when one of the palette files is staged. `git commit
 --no-verify` skips it deliberately.
 
 Prefer `SIM=verilator` for the frame-capture tests and `gold` specifically --
-icarus takes 1-4 minutes per frame-capture test, verilator ~35-55s for the
-same test, and the full `gold` regeneration (3 frame captures + the delay
-sweep's 0us case) in well under 3 minutes instead of most of `delay-sweep`'s
-~10. Icarus stays the default (`SIM ?= icarus` in `test/Makefile`) since it's
-what CI and the gate-level (`GATES=yes`) run are proven against; verilator is
-opt-in for local iteration:
+icarus takes ~30s per frame-capture test, verilator 2-7s, and the whole
+suite runs in under a minute under verilator. Frame captures wait on vsync
+edges, not clock-cycle counts (`capture_frame()` in `test_multi_seg.py`):
+cocotb's `ClockCycles(n)` goes through Python on every edge, and waiting 5
+frames that way used to be most of each test's run time. Icarus stays the
+default (`SIM ?= icarus` in `test/Makefile`) since it's what CI and the
+gate-level (`GATES=yes`) run are proven against; verilator is opt-in for local
+iteration:
 
     SIM=verilator make -C test gold
 

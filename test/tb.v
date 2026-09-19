@@ -9,9 +9,12 @@
 // capture is driven entirely from the output pins rather than from internal
 // signals, so what lands in the file is what the pmod would see.
 //
-// Writing the file from Verilog rather than from cocotb matters: it lets the
-// test advance a whole frame in a single ClockCycles await instead of 663168
-// Python callbacks.
+// Writing the file from Verilog rather than from cocotb matters: the test
+// only has to wait on a few vsync edges (capture_frame() in
+// test_multi_seg.py) instead of sampling 663168 clock cycles from Python.
+// Waiting on the clock is just as costly, by the way -- cocotb's
+// ClockCycles(n) goes through Python on every edge -- which is why the
+// capture waits for vsync edges rather than for a cycle count.
 //
 module tb ();
 
