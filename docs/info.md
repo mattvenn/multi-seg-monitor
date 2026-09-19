@@ -38,7 +38,7 @@ Video timing is 800x600 @ 60 Hz from a 40 MHz pixel clock.
 
 On the ASIC the line buffer is the IHP foundry macro
 `RM_IHPSG13_1P_1024x8_c2_bm_bist`, single port, byte wide, one cycle read latency.
-The renderer reads 4 of every 12 cycles and the source writes into the gaps, so read
+The renderer reads 2 of every 12 cycles and the source writes into the gaps, so read
 and write are never asserted together — which is what allows a single port macro.
 
 ## How to test

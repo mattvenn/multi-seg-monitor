@@ -95,13 +95,60 @@ module multi_seg_monitor (
     wire [5:0] row   = y_rel[9:4];
 
     // ------------------------------------------------------------------
+    // Segment zones
+    //
+    // Each segment is one AND of an x zone and a y zone -- the renderer below
+    // uses both, the prefetch only the y zones.
+    // ------------------------------------------------------------------
+    // The digit body is 10x14 inside the 12x16 cell.  The spare column and the
+    // spare two rows are what stop a digit's right rail merging into its
+    // neighbour's left rail, and one row's bottom bar merging into the next
+    // row's top bar -- without them the grid reads as a mesh rather than as
+    // digits.  The decimal point lives in the spare column, which is where a
+    // real display puts it.
+    wire xz_left  = (cx < 2);                   // f, e
+    wire xz_mid   = (cx >= 2)  && (cx < 8);     // a, g, d
+    wire xz_right = (cx >= 8)  && (cx < 10);    // b, c
+    wire xz_dp    = (cx == 10);                 // DP, cx == 11 is the gap
+
+    wire yz_top   = (cy < 2);                   // a
+    wire yz_up    = (cy >= 2)  && (cy < 6);     // f, b
+    wire yz_mid   = (cy >= 6)  && (cy < 8);     // g
+    wire yz_low   = (cy >= 8)  && (cy < 12);    // e, c
+    wire yz_bot   = (cy >= 12) && (cy < 14);    // d, DP; cy 14,15 is the gap
+
+    // Every segment sits in exactly one y zone, and no y zone crosses more than
+    // two segments, so a scanline only ever shows two of a digit's eight
+    // nibbles. The prefetch fetches just those two, into two slots: slot 0 for
+    // the segment in the left or middle x zone, slot 1 for the one in the
+    // right or DP zone. Segment numbers are the nibble order (a = 0 ... DP =
+    // 7), so segment k is byte k[2:1], high nibble if k[0].
+    reg [2:0] slot0_seg, slot1_seg;
+
+    always @* begin
+        case (1'b1)
+            yz_top:  {slot0_seg, slot1_seg} = {3'd0, 3'd0};  // a, -
+            yz_up:   {slot0_seg, slot1_seg} = {3'd5, 3'd1};  // f, b
+            yz_mid:  {slot0_seg, slot1_seg} = {3'd6, 3'd0};  // g, -
+            yz_low:  {slot0_seg, slot1_seg} = {3'd4, 3'd2};  // e, c
+            yz_bot:  {slot0_seg, slot1_seg} = {3'd3, 3'd7};  // d, DP
+            default: {slot0_seg, slot1_seg} = {3'd0, 3'd0};  // gap rows
+        endcase
+    end
+
+    // ------------------------------------------------------------------
     // Line buffer and prefetch
     //
     // The renderer reads the half indexed by the current digit row while the
-    // generator fills the other.  A digit is 4 bytes and a cell is 12 pixels
-    // wide, so the next digit is fetched a byte at a time over the first four
-    // pixels of the current one.  Column 0 of each row is fetched during the left
-    // margin.
+    // generator fills the other.  A digit is 4 bytes, but a scanline only shows
+    // two of its nibbles (the slots above), so the next digit's two are
+    // fetched a byte each over the first two pixels of the current one.
+    // Column 0 of each row is fetched during the left margin.
+    //
+    // Fetching all 4 bytes instead is what this used to do: 64 flops of
+    // digit registers rather than 16 plus the byte-lane and 8-way nibble
+    // muxes around them, about 3.7k um^2 synthesised on IHP, and twice the
+    // reads for no pixel that could ever use them.
     // ------------------------------------------------------------------
     // Four row buffers, not two.  The 1 kB macro was already being bought for
     // 512 B, and the spare capacity buys timing freedom instead: the host may run
@@ -110,36 +157,41 @@ module multi_seg_monitor (
     // and one that can free-run at a fixed rate (SPEC.md section 4.3).
     wire [1:0] render_buf = row[1:0];
 
-    wire       fetch_en   = cell_x ? (cx < 4)     : (x_px < 4);
+    wire       fetch_en   = cell_x ? (cx < 2)     : (x_px < 2);
     wire [5:0] fetch_col  = cell_x ? (col + 1'b1) : 6'd0;
-    wire [1:0] fetch_byte = cell_x ? cx[1:0]      : x_px[1:0];
+    wire       fetch_slot = cell_x ? cx[0]        : x_px[0];
+    wire [2:0] fetch_seg  = fetch_slot ? slot1_seg : slot0_seg;
+    wire [1:0] fetch_byte = fetch_seg[2:1];
 
-    reg       fetch_en_d;
-    reg [1:0] fetch_byte_d;
+    reg fetch_en_d;
+    reg fetch_slot_d;
+    reg fetch_hi_d;
 
     always @(posedge clk) begin
         fetch_en_d   <= fetch_en;
-        fetch_byte_d <= fetch_byte;
+        fetch_slot_d <= fetch_slot;
+        fetch_hi_d   <= fetch_seg[0];
     end
 
-    // Reads take 4 of every 12 cycles to prefetch the next digit, so writes have
-    // the other 8 -- about 26.7 MB/s against the 606 kB/s a source actually needs.
+    // Reads take 2 of every 12 cycles to prefetch the next digit, so writes have
+    // the other 10 -- about 33 MB/s against the 606 kB/s a source actually needs.
     // Reads always win, which is what keeps the one-access-per-cycle guarantee
     // the memory wrapper depends on (SPEC.md section 8.1).
     wire lb_re    = fetch_en;
     wire wr_grant = !lb_re;
 
     wire [7:0] lb_rdata;
-    reg [31:0] next_digit;
-    reg [31:0] cur_digit;
+    reg [7:0] next_digit;  // {slot 1, slot 0}
+    reg [7:0] cur_digit;
 
     always @(posedge clk) begin
         if (!rst_n) begin
-            next_digit <= 32'b0;
-            cur_digit  <= 32'b0;
+            next_digit <= 8'b0;
+            cur_digit  <= 8'b0;
         end else begin
             if (fetch_en_d)
-                next_digit[{fetch_byte_d, 3'b000} +: 8] <= lb_rdata;
+                next_digit[{fetch_slot_d, 2'b00} +: 4] <= fetch_hi_d ? lb_rdata[7:4]
+                                                                     : lb_rdata[3:0];
             if (x_px == MARGIN_X - 1 || (cell_x && cx == CELL_W - 1))
                 cur_digit <= next_digit;
         end
@@ -299,47 +351,19 @@ module multi_seg_monitor (
     // Each segment is one AND of an x zone and a y zone, so the whole digit costs
     // a handful of constant comparisons rather than a bitmap lookup.  Zones that
     // meet at a corner select nothing, which is what leaves the cell corners
-    // blank.  Layout is SPEC.md section 1.1.
+    // blank.  Layout is SPEC.md section 1.1.  The y zone already picked which
+    // two segments were fetched, so the x zone only has to pick the slot.
     // ------------------------------------------------------------------
-    // The digit body is 10x14 inside the 12x16 cell.  The spare column and the
-    // spare two rows are what stop a digit's right rail merging into its
-    // neighbour's left rail, and one row's bottom bar merging into the next
-    // row's top bar -- without them the grid reads as a mesh rather than as
-    // digits.  The decimal point lives in the spare column, which is where a
-    // real display puts it.
-    wire xz_left  = (cx < 2);                   // f, e
-    wire xz_mid   = (cx >= 2)  && (cx < 8);     // a, g, d
-    wire xz_right = (cx >= 8)  && (cx < 10);    // b, c
-    wire xz_dp    = (cx == 10);                 // DP, cx == 11 is the gap
+    wire seg_hit = (xz_mid   & yz_top) |   // a
+                   (xz_right & yz_up ) |   // b
+                   (xz_right & yz_low) |   // c
+                   (xz_mid   & yz_bot) |   // d
+                   (xz_left  & yz_low) |   // e
+                   (xz_left  & yz_up ) |   // f
+                   (xz_mid   & yz_mid) |   // g
+                   (xz_dp    & yz_bot);    // DP
 
-    wire yz_top   = (cy < 2);                   // a
-    wire yz_up    = (cy >= 2)  && (cy < 6);     // f, b
-    wire yz_mid   = (cy >= 6)  && (cy < 8);     // g
-    wire yz_low   = (cy >= 8)  && (cy < 12);    // e, c
-    wire yz_bot   = (cy >= 12) && (cy < 14);    // d, DP; cy 14,15 is the gap
-
-    reg [2:0] seg_idx;
-    reg       seg_hit;
-
-    always @* begin
-        seg_hit = 1'b1;
-        case (1'b1)
-            xz_mid   & yz_top: seg_idx = 3'd0;   // a
-            xz_right & yz_up : seg_idx = 3'd1;   // b
-            xz_right & yz_low: seg_idx = 3'd2;   // c
-            xz_mid   & yz_bot: seg_idx = 3'd3;   // d
-            xz_left  & yz_low: seg_idx = 3'd4;   // e
-            xz_left  & yz_up : seg_idx = 3'd5;   // f
-            xz_mid   & yz_mid: seg_idx = 3'd6;   // g
-            xz_dp    & yz_bot: seg_idx = 3'd7;   // DP
-            default: begin
-                seg_idx = 3'd0;
-                seg_hit = 1'b0;
-            end
-        endcase
-    end
-
-    wire [3:0] seg_int = cur_digit[{seg_idx, 2'b00} +: 4];
+    wire [3:0] seg_int = (xz_right | xz_dp) ? cur_digit[7:4] : cur_digit[3:0];
     wire       visible = seg_hit && cell_x && cell_y;
 
     // Colour comes from a selectable palette rather than a single grey value
@@ -360,8 +384,10 @@ module multi_seg_monitor (
     // path and stop the DAC pins glitching while it settles.
     //
     // The palette input used to be one cycle behind the raw syncs; these add
-    // three more, so the syncs get four flops to match. Every pin moves by
-    // the same cycles, so the picture doesn't move at all.
+    // three more, so the syncs get four cycles to match. VgaSyncGen now
+    // decodes its syncs from the registered coordinates, which is already one
+    // of those cycles, so three flops here make up the rest. Every pin moves
+    // by the same cycles, so the picture doesn't move at all.
     reg [3:0] pal_idx;
 
     always @(posedge clk)
@@ -376,20 +402,24 @@ module multi_seg_monitor (
         .b      (b)
     );
 
-    reg [2:0] hsync_p, vsync_p;
+    reg [1:0] hsync_p, vsync_p;
 
     always @(posedge clk) begin
-        hsync_p <= {hsync_p[1:0], vga_hsync};
-        vsync_p <= {vsync_p[1:0], vga_vsync};
-        hsync   <= hsync_p[2];
-        vsync   <= vsync_p[2];
+        hsync_p <= {hsync_p[0], vga_hsync};
+        vsync_p <= {vsync_p[0], vga_vsync};
+        hsync   <= hsync_p[1];
+        vsync   <= vsync_p[1];
     end
 
 `ifdef FORMAL
-    // `read_verilog -formal` (see formal/) defines FORMAL in place of
-    // SYNTHESIS. Each property below is compiled in only by the one
-    // formal/*.sby run that -D's its own guard macro, so the three proofs
-    // stay independent of each other despite living in one module.
+    // `read_verilog -formal` defines FORMAL in place of SYNTHESIS. Each
+    // property below is compiled in only when its own guard macro is -D'd,
+    // so the three stay independent of each other despite living in one
+    // module. No formal/*.sby runs them any more: their three .sby files
+    // (lb_exclusivity, zone_exclusivity, buf_isolation) stopped building
+    // when palette.v and config_port.v were added, and were removed rather
+    // than kept broken -- git history has them. A .sby for one needs the
+    // full core file list, not just the modules the property touches.
 
 `ifdef FORMAL_WE_RE
     // we and re must never be high in the same cycle (line_buffer.v): on

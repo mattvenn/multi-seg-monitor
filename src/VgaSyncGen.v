@@ -53,63 +53,57 @@ module VgaSyncGen (
     parameter vbp = 23;                         // Vertical back porch length.
     parameter blackH = hfp + hpulse + hbp;      // Hide pixels in one line.
     parameter blackV = vfp + vpulse + vbp;      // Hide lines in one frame.
-    parameter hpixels = blackH + activeHvideo;  // Total horizontal pixels.
-    parameter vlines = blackV + activeVvideo;   // Total lines.
 
-    // Registers for storing the horizontal & vertical counters. hc is 11 bits
-    // because hpixels can exceed the 10-bit range that used to be enough when
-    // this only ever ran 640x480 (832 total) -- e.g. 800x600's 1056 total needs
-    // it. vc stays 10 bits; every mode built so far keeps vlines under 1024.
-    reg [10:0] hc;
-    reg [9:0]  vc;
+    // No separate hc/vc counters: x_px and y_px are the counters. They start
+    // at -blackH/-blackV and count up through the blanking interval to 0 at the
+    // first visible pixel/line, so they read as screen coordinates directly
+    // and underflow to large values during blanking, which is what the core's
+    // range checks rely on. This used to be hc/vc plus a registered copy of
+    // each, less blackH/blackV -- 21 flops (about 1.3k um^2 synthesised on
+    // IHP) spent holding the same count twice.
+    //
+    // The registered copy also ran one cycle behind the counter the syncs were
+    // decoded from. The syncs are now decoded from the coordinates, so they
+    // come out one cycle later than they used to; multi_seg_monitor.v's sync
+    // pipeline is one flop shorter to match, and every pin still moves on the
+    // same cycle as before.
+    //
+    // 11 bits for x because a 1056 pixel line (blackH + activeHvideo) won't
+    // fit in 10; y stays 10 bits (628 lines).
+    localparam integer xStartInt = 2048 - blackH;
+    localparam integer yStartInt = 1024 - blackV;
+    localparam [10:0] xStart = xStartInt[10:0];  // -blackH, 11 bits
+    localparam [9:0]  yStart = yStartInt[9:0];   // -blackV, 10 bits
 
-    // Counting pixels.
     always @(posedge px_clk)
     begin
-        if(reset) begin
-            hc <= 0;
-            vc <= 0;
-        end else begin
-            // Keep counting until the end of the line.
-            if (hc < hpixels - 1)
-                hc <= hc + 1;
+        if (reset) begin
+            x_px <= xStart;
+            y_px <= yStart;
+        end else if (x_px == activeHvideo - 1) begin
+            // End of the line: back to the start of horizontal blanking, and
+            // on to the next line (or back to the top of the frame).
+            x_px <= xStart;
+            if (y_px == activeVvideo - 1)
+                y_px <= yStart;
             else
-            // When we hit the end of the line, reset the horizontal
-            // counter and increment the vertical counter.
-            // If vertical counter is at the end of the frame, then
-            // reset that one too.
-            begin
-                hc <= 0;
-                if (vc < vlines - 1)
-                vc <= vc + 1;
-            else
-               vc <= 0;
-            end
-        end
-     end
-
-    // Generate sync pulses (active low) and active video.
-    assign hsync = (hc >= hfp && hc < hfp + hpulse) ? 0:1;
-    assign vsync = (vc >= vfp && vc < vfp + vpulse) ? 0:1;
-    assign activevideo = (hc >= blackH && vc >= blackV) ? 1:0;
-
-    // Generate color.
-    always @(posedge px_clk)
-    begin
-        if(reset) begin
-            x_px <= 0;
-            y_px <= 0;
+                y_px <= y_px + 1;
         end else begin
-            x_px <= hc - blackH;
-            y_px <= vc - blackV;
+            x_px <= x_px + 1;
         end
-     end
+    end
+
+    // Generate sync pulses (active low) and active video. Front porch, then
+    // sync, then back porch, all counted from the start of blanking.
+    assign hsync = (x_px >= xStart + hfp && x_px < xStart + hfp + hpulse) ? 0:1;
+    assign vsync = (y_px >= yStart + vfp && y_px < yStart + vfp + vpulse) ? 0:1;
+    assign activevideo = (x_px < activeHvideo && y_px < activeVvideo) ? 1:0;
 
 `ifdef FORMAL
     // `read_verilog -formal` (see formal/) defines FORMAL in place of
     // SYNTHESIS, so none of this reaches synthesis or ordinary simulation.
 
-    // hc/vc are undefined pre-reset like any other register here, so the
+    // x_px/y_px are undefined pre-reset like any other register here, so the
     // bound only has to hold once a real reset has actually happened --
     // k-induction otherwise explores states that just power up already
     // out of range, which reset never claimed to rule out.
@@ -118,16 +112,16 @@ module VgaSyncGen (
         if (reset)
             f_reset_done <= 1'b1;
 
-    // The wraparound compares (hc < hpixels-1, vc < vlines-1) are the only
-    // thing standing between this counter and walking off the end of the
+    // The wraparound compares (x_px, y_px == last visible pixel/line) are the
+    // only thing standing between this counter and walking off the end of the
     // line/frame -- exactly the kind of off-by-one that changed silently
     // between the 640x480 and 800x600 modes (resolution_discussion.md
     // section 11). k-induction, not full BMC replay: the invariant only
     // needs one step to re-establish itself, not a full frame of history.
     always @(posedge px_clk)
         if (f_reset_done) begin
-            assert (hc < hpixels);
-            assert (vc < vlines);
+            assert (x_px < activeHvideo || x_px >= xStart);
+            assert (y_px < activeVvideo || y_px >= yStart);
         end
 `endif
 

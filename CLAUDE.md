@@ -94,9 +94,10 @@ drawn. Everything below follows from that.
   the 1 kB address space with no spare left. Four rather than two is what lets the
   host free-run at a fixed byte rate between one and three rows ahead instead of
   handshaking every row.
-- **Single-port discipline.** The renderer reads 4 of every 12 cycles to prefetch
-  the next digit; `wr_grant = !lb_re` gives writes the other 8. `we` and `re` must
-  **never** be high in the same cycle — on the IHP macro that combination is
+- **Single-port discipline.** The renderer reads 2 of every 12 cycles to prefetch
+  the next digit — only the two bytes holding the two segments the current
+  scanline can show, not all four; `wr_grant = !lb_re` gives writes the other
+  10. `we` and `re` must **never** be high in the same cycle — on the IHP macro that combination is
   write-through and would silently put `wdata` at `raddr`. `tb.v` asserts this every
   cycle rather than trusting the arbitration.
 - **Two memory implementations behind one interface.** Undefined, `line_buffer.v`
