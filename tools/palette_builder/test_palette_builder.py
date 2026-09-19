@@ -272,6 +272,27 @@ def test_effect_index_image_matches_attract_proto():
             assert not idx.ravel()[off].any(), f"{name} lit a background pixel"
 
 
+def test_effect_change_fades_through_black():
+    import attract_proto as ap
+
+    half = ap.FADE_FRAMES // 2
+    fades = [ap.fade_factor(k) for k in range(ap.FADE_FRAMES + 1)]
+    assert fades[0] == 15 and fades[-1] == 15
+    assert fades[half - 1] == 0 and fades[half] == 0  # black at the switch
+    assert all(a >= b for a, b in zip(fades[:half], fades[1:half]))  # only ever down...
+    assert all(a <= b for a, b in zip(fades[half:], fades[half + 1 :]))  # ...then only up
+    assert set(fades[:half]) == set(range(16))  # every level on the way
+    assert not ap.fade_showing_new(half - 1) and ap.fade_showing_new(half)
+    for level in range(16):
+        assert ap.apply_fade(level, 15) == level and ap.apply_fade(level, 0) == 0
+    params = ap.default_params("plasma")
+    full = pb.index_image_from_effect("plasma", 100, params)
+    assert (pb.index_image_from_effect("plasma", 100, params, fade=15) == full).all()
+    assert not pb.index_image_from_effect("plasma", 100, params, fade=0).any()
+    half_lit = pb.index_image_from_effect("plasma", 100, params, fade=7)
+    assert (half_lit <= full).all() and half_lit.max() < full.max()
+
+
 def test_effect_param_defaults_are_in_range():
     import attract_proto
 

@@ -141,16 +141,18 @@ def _effect_coords():
     return _EFFECT_XY
 
 
-def index_image_from_effect(name, frame, params):
+def index_image_from_effect(name, frame, params, fade=15):
     """One frame of an attract_proto effect -> (600, 800) uint8 of intensities.
 
     The effect's sample function is evaluated once over the whole frame as
     numpy arrays (attract_proto writes its maths so the same code runs on ints
     or arrays), then scattered like index_image_from_frame. DP stays dark, as
-    in attract_proto.sample().
+    in attract_proto.sample(). `fade` (0..15) is attract_proto.apply_fade's
+    level, for the fade through black between effects.
     """
     x, y, is_dp = _effect_coords()
-    levels = np.asarray(attract_proto.EFFECTS[name](frame, **params)(x, y), dtype=np.uint8)
+    levels = np.asarray(attract_proto.EFFECTS[name](frame, **params)(x, y), dtype=np.int64)
+    levels = attract_proto.apply_fade(levels, fade)
     levels = np.where(is_dp, 0, levels).astype(np.uint8)
     mask, nibble_of = _segment_tables()
     idx = np.zeros(HEIGHT * WIDTH, dtype=np.uint8)
@@ -469,13 +471,17 @@ class App:
         self._drag = None  # which handle (0 = knee, 1 = second point) is held
         self._syncing = False
         self._playing = None  # the pending after() id while a clip plays
-        self._last_tick = None  # monotonic time of the last effect frame
+        self._anchor = None  # (monotonic time, frame) effect playback counts from
+        self._anchor_last = None  # the frame the last tick set, to spot a hand drag
         # Effects: which one, each one's parameters (kept per effect for the
         # session, so switching away and back keeps your tweaks), and where
         # each source's frame slider was, since clip and effect share it.
         self.effect = tk.StringVar(value="plasma")
         self.effect_params = {n: attract_proto.default_params(n) for n in attract_proto.PARAMS}
         self._effect_idx = (None, None)  # (key, index image) cache
+        self._change = None  # {"old", "start"} while fading between effects
+        self._shown_effect = None  # the effect actually on screen
+        self._fade_job = None  # after() id of the paused-fade pump
         self._frame_pos = {"droplet": 0, "effect": 0}
         self._scale_source = None  # whose frames the slider currently counts
         self.param_vars = {}
@@ -700,7 +706,7 @@ class App:
             self.source.set("effect" if on_pattern or not self.clips else "droplet")
             self._sync_scale()
         self.play_button.config(text="Pause")
-        self._last_tick = None
+        self._anchor = None
         self._tick()
 
     def _tick(self):
@@ -713,14 +719,23 @@ class App:
         speed is one of the things being tuned, so it has to look right.
         """
         start = time.monotonic()
+        cur = int(self.frame_scale.get())
         if self.source.get() == "effect":
-            step = 1 if self._last_tick is None else max(1, round((start - self._last_tick) * EFFECT_FPS))
-            self._last_tick = start
             n, period = EFFECT_FRAMES, 1000 // EFFECT_FPS
+            # Frames are counted from an anchor (when Play was pressed, or the
+            # slider last moved by hand), not added up tick by tick: rounding
+            # each tick's elapsed time to whole frames dropped the fraction
+            # every time, and ran effects at ~0.7-0.9x real speed.
+            if self._anchor is None or cur != self._anchor_last:
+                self._anchor = (start, cur)
+            t0, f0 = self._anchor
+            nxt = (f0 + int((start - t0) * EFFECT_FPS)) % n
+            self._anchor_last = nxt
         else:
-            step, period = 1, PLAY_MS
+            period = PLAY_MS
             n = self.clips[self.clip_box.current()][1] if self.clips else 1
-        self.frame_scale.set((int(self.frame_scale.get()) + step) % max(n, 1))
+            nxt = (cur + 1) % max(n, 1)
+        self.frame_scale.set(nxt)
         self.refresh()
         spent = int((time.monotonic() - start) * 1000)
         # Always leave a gap before the next tick. A render plus its redraw
@@ -821,9 +836,72 @@ class App:
             self._sync_scale()
             self.refresh()
 
+    # -- changing effect: fade to black, switch, fade up (attract_proto) --
+
+    def _change_frames(self):
+        """Frames into the current change, on wall-clock time like Play, so
+        the fade takes its real 3 s whether or not the effect is playing."""
+        return int((time.monotonic() - self._change["start"]) * EFFECT_FPS)
+
+    def _effect_on_screen(self):
+        """(effect, fade level) the preview shows right now."""
+        if self._change is not None:
+            k = self._change_frames()
+            if k < attract_proto.FADE_FRAMES:
+                fade = attract_proto.fade_factor(k)
+                if attract_proto.fade_showing_new(k):
+                    self._shown_effect = self.effect.get()
+                    return self._shown_effect, fade
+                return self._change["old"], fade
+            self._change = None
+        self._shown_effect = self.effect.get()
+        return self._shown_effect, 15
+
+    def _start_change(self):
+        """Begin a fade from whatever is on screen to self.effect."""
+        now = time.monotonic()
+        half = attract_proto.FADE_FRAMES // 2
+        if self._change is not None:
+            k = self._change_frames()
+            if k < half:
+                return  # still fading out: the new target just changes
+            if k < attract_proto.FADE_FRAMES:
+                # Mid fade-in: fade the half-risen effect back out from its
+                # current brightness, not from full.
+                fade = attract_proto.fade_factor(k)
+                self._change = {"old": self._shown_effect,
+                                "start": now - ((15 - fade) * half // 16) / EFFECT_FPS}
+                self._pump_fade()
+                return
+        if self._shown_effect in (None, self.effect.get()):
+            self._change = None
+            return
+        self._change = {"old": self._shown_effect, "start": now}
+        self._pump_fade()
+
+    def _pump_fade(self):
+        """Keep the fade moving while paused; while playing, _tick redraws
+        every frame anyway."""
+        if self._fade_job is not None:
+            return
+
+        def step():
+            self._fade_job = None
+            if self._change is None or self.source.get() != "effect":
+                return
+            if self._playing is None:
+                self.refresh()
+            self._fade_job = self.root.after(max(MIN_GAP_MS, 1000 // EFFECT_FPS), step)
+
+        step()
+
     def _effect_changed(self):
         self._build_params()
-        self._show_effect()
+        if self.source.get() == "effect":
+            self._start_change()  # the picture fades; the sliders switch now
+        else:
+            self._shown_effect = None
+            self._show_effect()
         self.refresh()
 
     def _tab_changed(self):
@@ -956,11 +1034,11 @@ class App:
                 raise ValueError(f"generator frame unavailable: {self.gen_error}")
             return self.gen_idx
         if self.source.get() == "effect":
-            name = self.effect.get()
+            name, fade = self._effect_on_screen()
             params = self.effect_params[name]
-            key = (name, int(self.frame_scale.get()), tuple(sorted(params.items())))
+            key = (name, int(self.frame_scale.get()), tuple(sorted(params.items())), fade)
             if self._effect_idx[0] != key:
-                self._effect_idx = (key, index_image_from_effect(name, key[1], params))
+                self._effect_idx = (key, index_image_from_effect(name, key[1], params, fade))
             return self._effect_idx[1]
         if not self.clips:
             raise ValueError("no current-geometry .seg clips found in the repo root")

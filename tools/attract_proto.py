@@ -183,6 +183,48 @@ def ripples_frame(frame, **_):
 # ---------------------------------------------------------------------------
 
 
+def _levels(fine):
+    """Wrap a 6-bit sample function as the 4-bit one everything else calls;
+    the 6-bit one stays reachable as .fine, for dither()."""
+
+    def f(x, y):
+        return fine(x, y) >> 2
+
+    f.fine = fine
+    return f
+
+
+# ---------------------------------------------------------------------------
+# Temporal dither
+#
+# Every tunable effect computes 6 bits and shows 4, and slow motion is where
+# that shows: a contour band creeps a whole brightness step at a time, which
+# fast motion hides. Dithering spends the 2 dropped bits over time: a
+# threshold cycles through 0-3 over 4 frames, and the level rounds up on the
+# frames where the dropped bits beat it -- so over 4 frames at 60 Hz the eye
+# averages 64 levels, and a band creeps in quarter steps.
+#
+# The threshold is offset by position (a 2x2 ordered pattern over column+seg
+# and row parity) so neighbouring segments don't all round up on the same
+# frame, which would read as the whole screen flickering.
+#
+# Cost: 2 frame-counter bits (exist), 3 parity bits (exist), a 2-bit compare
+# and an increment with a clip at 15, applied as each byte goes to the line
+# buffer. No flops.
+#
+# Tried and rejected by eye (2026-09-19, lossless 60 fps renders of all three
+# effects): not wanted in the RTL. Kept only as a record of the experiment,
+# alongside the earlier spatial attempt on the gamma-dithering branch.
+# ---------------------------------------------------------------------------
+_BAYER2 = (0, 2, 3, 1)  # 2x2 ordered: [[0, 2], [3, 1]], row-major
+
+
+def dither(fine, frame, col, row, seg):
+    """6-bit level -> 4-bit, rounding up on the right share of frames."""
+    t = (_BAYER2[(((row & 1) << 1) | ((col + seg) & 1))] + frame) & 3
+    return min(15, (fine >> 2) + ((fine & 3) > t))
+
+
 def _sources(frame, drift):
     """Two points wandering on triangle-wave Lissajous paths. `drift` 4 takes
     about a minute to cross the screen; the four rates are 6:4:4:5 so the pair
@@ -213,22 +255,22 @@ def _sources(frame, drift):
 ZONEPLATE_PARAMS = [
     ("ring_shift", 8, 16, 13, "ring density: r^2 >> this; lower = more, finer rings"),
     ("drift", 0, 32, 4, "how fast the sources wander"),
-    ("phase_speed", 0, 64, 2, "how fast the rings flow, in 1/16 brightness steps per frame"),
+    ("phase_speed", 0, 64, 4, "how fast the rings flow, in 1/16 brightness steps per frame"),
     ("sources", 1, 2, 2, "one zone plate, or two (which look like one at their midpoint)"),
 ]
 
 
-def zoneplate_frame(frame, ring_shift=13, drift=4, phase_speed=2, sources=2):
+def zoneplate_frame(frame, ring_shift=13, drift=4, phase_speed=4, sources=2):
     ax, ay, bx, by = _sources(frame, drift)
     sh = ring_shift - 2
 
-    def f(x, y):
+    def fine(x, y):
         p = ((x - ax) ** 2 + (y - ay) ** 2) >> sh
         if sources == 2:
             p = p + (((x - bx) ** 2 + (y - by) ** 2) >> sh)
-        return tri(p - ((frame * phase_speed) >> 2), 7) >> 2
+        return tri(p - ((frame * phase_speed) >> 2), 7)
 
-    return f
+    return _levels(fine)
 
 
 # ---------------------------------------------------------------------------
@@ -245,22 +287,22 @@ def zoneplate_frame(frame, ring_shift=13, drift=4, phase_speed=2, sources=2):
 INTERFERENCE_PARAMS = [
     ("ring_spacing", 0, 7, 5, "a ring every 16 * 2^k px of summed distance"),
     ("drift", 0, 32, 3, "how fast the sources wander"),
-    ("phase_speed", 0, 64, 2, "how fast the rings flow, in 1/16 brightness steps per frame"),
+    ("phase_speed", 0, 128, 8, "how fast the rings flow, in 1/128 brightness steps per frame (16 = the old 2)"),
     ("mode", 0, 1, 1, "0 = sum of distances (ellipses), 1 = difference (hyperbolas)"),
     ("roundness", 1, 3, 3, "distance: 1 = 2 lines (octagonal), 2 = 4 lines (24-gon), 3 = exact sqrt"),
 ]
 
 
-def interference_frame(frame, ring_spacing=5, drift=3, phase_speed=2, mode=1, roundness=3):
+def interference_frame(frame, ring_spacing=5, drift=3, phase_speed=8, mode=1, roundness=3):
     ax, ay, bx, by = _sources(frame, drift)
 
-    def f(x, y):
+    def fine(x, y):
         da = dist_approx(x - ax, y - ay, roundness)
         db = dist_approx(x - bx, y - by, roundness)
         d = da - db if mode else da + db
-        return tri(((d << 3) >> ring_spacing) - ((frame * phase_speed) >> 2), 7) >> 2
+        return tri(((d << 3) >> ring_spacing) - ((frame * phase_speed) >> 5), 7)
 
-    return f
+    return _levels(fine)
 
 
 # ---------------------------------------------------------------------------
@@ -327,7 +369,7 @@ def plasma_frame(frame, x_shift=4, y_shift=4, diag_shift=5, radial_shift=3, spee
     cx = GRID_W // 2 + (((sin256(t >> 10) - 32) * wobble) >> 2)
     cy = GRID_H // 2 + (((sin256((t >> 10) + 64) - 32) * wobble * 3) >> 4)
 
-    def f(x, y):
+    def fine(x, y):
         s = sin256(((x << 2) >> x_shift) + (t >> 8))
         s = s + sin256(((y << 2) >> y_shift) - ((t * 3) >> 9))
         s = s + sin256((((x + y) << 2) >> diag_shift) + ((t * 5) >> 9))
@@ -335,10 +377,12 @@ def plasma_frame(frame, x_shift=4, y_shift=4, diag_shift=5, radial_shift=3, spee
         # The sum of four sines (0..252) clusters around the middle, so one
         # fold spends most of 0..15 near full brightness; two spends it on
         # the part of the sum that actually moves. Three and four draw
-        # contour bands.
-        return tri(s, 9 - folds) >> (4 - folds)
+        # contour bands. Rescaled to 6 bits: the top 4 are the level, the
+        # rest what dither() spends.
+        v = tri(s, 9 - folds)
+        return v >> (2 - folds) if folds <= 2 else v << (folds - 2)
 
-    return f
+    return _levels(fine)
 
 
 
@@ -450,6 +494,42 @@ PARAMS = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Changing effect: fade to black, switch, fade back up
+#
+# The attract sequencer changes effect this way, so a change never cuts
+# between two unrelated pictures. A counter k runs from 0 at the moment of
+# the change; the old effect fades out over the first half, the new one in
+# over the second, with the switch made while the screen is black.
+#
+# Cost: an 8-bit frame counter, a 4-bit fade level derived from it, and a
+# 4x5 multiply on each level on its way to the line buffer (the same shape
+# as the palette's, and one per byte serially would do). ~15 flops.
+# ---------------------------------------------------------------------------
+FADE_FRAMES = 180  # the whole change: 3 s at 60 fps, 1.5 s down and 1.5 s up
+
+
+def fade_factor(k):
+    """Fade level 0..15 (15 = full brightness) at k frames into a change.
+    Frames 0..FADE_FRAMES/2-1 fade the old effect out, the rest fade the
+    new one in; returns 15 once the change is over."""
+    half = FADE_FRAMES // 2
+    if k < half:
+        return 15 - (k * 16) // half
+    return min(15, ((k - half) * 16) // half)
+
+
+def fade_showing_new(k):
+    """Whether frame k of a change shows the new effect (the second half)."""
+    return k >= FADE_FRAMES // 2
+
+
+def apply_fade(level, fade):
+    """Scale a 4-bit level by fade/15: exact at both ends (fade 15 leaves
+    every level alone, fade 0 is black) with one small multiply."""
+    return (level * (fade + 1)) >> 4
+
+
 def default_params(name):
     return {p[0]: p[3] for p in PARAMS.get(name, [])}
 
@@ -459,18 +539,25 @@ def param_args(params):
     return " ".join(f"--param {k}={v}" for k, v in params.items())
 
 
-def sample(f, per_digit):
-    """Turn a sample function into [row][col][seg] levels."""
+def sample(f, per_digit, dither_frame=None):
+    """Turn a sample function into [row][col][seg] levels. With dither_frame
+    set, a 6-bit effect is temporally dithered for that frame instead of
+    truncated (see dither())."""
+    if dither_frame is not None and hasattr(f, "fine"):
+        fine = f.fine
+        g = lambda x, y, c, r, s: dither(fine(x, y), dither_frame, c, r, s)  # noqa: E731
+    else:
+        g = lambda x, y, c, r, s: f(x, y)  # noqa: E731
     out = []
     for r in range(ROWS):
         line = []
         for c in range(COLS):
             x, y = c * segments.CELL_W, r * segments.CELL_H
             if per_digit:
-                v = f(x + 5, y + 7)
+                v = g(x + 5, y + 7, c, r, 0)
                 line.append([v] * 7 + [0])
             else:
-                line.append([f(x + SEG_CX[s], y + SEG_CY[s]) for s in range(7)] + [0])
+                line.append([g(x + SEG_CX[s], y + SEG_CY[s], c, r, s) for s in range(7)] + [0])
         out.append(line)
     return out
 
@@ -530,9 +617,10 @@ def run(name, args):
         if ca:
             lv = ca_levels(ca.frame(fr))
         else:
-            lv = sample(EFFECTS[name](fr, **params), args.per_digit)
+            lv = sample(EFFECTS[name](fr, **params), args.per_digit,
+                        dither_frame=fr if args.dither else None)
         frames.append(draw(lv, pal))
-    tag = f"{name}{'_digit' if args.per_digit else ''}_p{args.palette}"
+    tag = f"{name}{'_digit' if args.per_digit else ''}{'_dither' if args.dither else ''}_p{args.palette}"
     if args.levels == 4:
         tag += "_tinyvga"
     os.makedirs(args.out, exist_ok=True)
@@ -544,7 +632,7 @@ def run(name, args):
         ff = subprocess.Popen(
             ["ffmpeg", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24",
              "-s", f"{WIDTH}x{HEIGHT}", "-r", str(60 // args.stride or 1), "-i", "-",
-             "-c:v", "libx264", "-crf", "12", "-pix_fmt", "yuv444p", mp4],
+             "-c:v", "libx264", "-qp", "0", "-pix_fmt", "yuv444p", mp4],
             stdin=subprocess.PIPE,
         )
         for im in frames:
@@ -568,6 +656,8 @@ def main():
     ap.add_argument("--palette", type=int, default=0, choices=range(len(segments.PALETTES)))
     ap.add_argument("--levels", type=int, default=16, choices=(4, 16))
     ap.add_argument("--per-digit", action="store_true")
+    ap.add_argument("--dither", action="store_true",
+                    help="temporally dither the 2 bits below the 4-bit level (plasma, zoneplate, interference)")
     ap.add_argument("--out", default="attract_out")
     ap.add_argument("--mp4", action="store_true", help="60 fps H.264 via ffmpeg instead of a GIF")
     ap.add_argument("--param", action="append", default=[], metavar="NAME=VALUE",
