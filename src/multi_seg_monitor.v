@@ -200,27 +200,32 @@ module multi_seg_monitor (
     // ------------------------------------------------------------------
     // Internal generator
     //
-    // Fills every one of the 2368 digits with a scrolling diagonal of hex values
-    // and a brightness band that varies across the row, so a single glance at the
-    // screen exercises all 16 patterns, all 8 segments, the whole grid and the
-    // gamma LUT.
+    // Draws a moving zone plate (zoneplate.v) into every one of the 2368
+    // digits, with no external data: the picture a bare board shows, and the
+    // silicon bring-up safety net. It replaced a scrolling hex test pattern;
+    // the zone plate still sweeps all 15 lit codes across the screen, but the
+    // decimal point is always dark in this mode.
     //
     // Row N+1 is built while row N is on screen, into the buffer half that is not
-    // being read.  Writes take whatever cycles the renderer is not using, so a
+    // being read. Each byte waits for the zone plate to compute it (~12 cycles)
+    // and is then written in whatever cycle the renderer isn't reading, so a
     // row's 256 bytes are placed long before that row is needed.
     // ------------------------------------------------------------------
-    // 6 bits to count 37 rows, but the pattern only mixes in the low 4.
-    // verilator lint_off UNUSEDSIGNAL
-    reg [5:0] gen_row;
-    // verilator lint_on UNUSEDSIGNAL
-    reg [7:0] gen_ptr;
-    reg [1:0] gen_buf;
-    reg       gen_busy;
-    reg [7:0] frame_ctr;
-    reg       vsync_d;
+    reg [5:0]  gen_row;
+    reg [7:0]  gen_ptr;
+    reg [1:0]  gen_buf;
+    reg        gen_busy;
+    // 14 bits: the zone plate's source paths wrap at 2^16 of frame * {24,
+    // 16, 20}, so the whole picture repeats every 2^14 frames (4.5 minutes)
+    // and a wider counter would change nothing. config_port's preset cycling
+    // still steps on the low byte wrapping.
+    reg [13:0] frame_ctr;
+    reg        vsync_d;
 
     wire frame_start = vsync_d && !vga_vsync;
-    wire gen_grant   = wr_grant && !stream_mode && gen_busy;
+    wire row_start   = cell_y && cy == 0 && x_px == 0 && row < ROWS - 1;
+    wire zp_ready;
+    wire gen_grant   = wr_grant && !stream_mode && gen_busy && zp_ready;
 
     always @(posedge clk) begin
         if (!rst_n) begin
@@ -241,7 +246,7 @@ module multi_seg_monitor (
                 gen_ptr   <= 0;
                 gen_busy  <= 1'b1;
                 frame_ctr <= frame_ctr + 1'b1;
-            end else if (cell_y && cy == 0 && x_px == 0 && row < ROWS - 1) begin
+            end else if (row_start) begin
                 // Start of digit row N: build row N+1 into the other buffer.
                 gen_row  <= row + 1'b1;
                 gen_buf  <= row[1:0] + 2'd1;
@@ -255,33 +260,25 @@ module multi_seg_monitor (
         end
     end
 
-    // verilator lint_off UNUSEDSIGNAL
-    wire [5:0] gen_col  = gen_ptr[7:2];  // likewise 64 columns, low 4 used
-    // verilator lint_on UNUSEDSIGNAL
-    wire [1:0] gen_byte = gen_ptr[1:0];
-    wire [3:0] gen_val  = gen_col[3:0] + gen_row[3:0] + frame_ctr[7:4];
-    wire [6:0] gen_segs;
+    wire [7:0] gen_data;
 
-    seg7_rom rom (
-        .value (gen_val),
-        .segs  (gen_segs)
+    // gen_ptr and gen_row hold still while a byte is computed: gen_ptr only
+    // moves on a grant, which waits for zp_ready. A row or frame restart
+    // moves them anyway, so it drops whatever byte was in progress.
+    zoneplate zp (
+        .clk         (clk),
+        .rst_n       (rst_n),
+        .frame_start (frame_start),
+        .frame       (frame_ctr),
+        .abort       (row_start),
+        .want        (gen_busy && !stream_mode),
+        .take        (gen_grant),
+        .col         (gen_ptr[7:2]),
+        .row         (gen_row),
+        .byte_idx    (gen_ptr[1:0]),
+        .ready       (zp_ready),
+        .data        (gen_data)
     );
-
-    // Decimal point on every eighth digit, so segment 7 is exercised too.
-    wire [7:0] gen_mask = {gen_col[2:0] == 3'b000, gen_segs};
-    // Brightness bands across the row.  Never zero, so no digit vanishes --
-    // but still cycles through every code 1-15, not just odd ones: |4'h1 was
-    // a cheap way to avoid zero that happened to throw away every even code
-    // too, which is what made the generator (the only way to see the design
-    // with no host attached) unable to show the top half of the DAC's range.
-    // See dithering_investigation.md on the gamma-dithering branch.
-    wire [3:0] gen_int  = (gen_col[3:0] == 4'h0) ? 4'hF : gen_col[3:0];
-
-    wire [2:0] seg_lo = {gen_byte, 1'b0};
-    wire [2:0] seg_hi = {gen_byte, 1'b1};
-
-    wire [7:0] gen_data = {gen_mask[seg_hi] ? gen_int : 4'h0,
-                           gen_mask[seg_lo] ? gen_int : 4'h0};
 
     // ------------------------------------------------------------------
     // Stream port and write arbitration
@@ -324,7 +321,7 @@ module multi_seg_monitor (
         .data        (stream_data),
         .stb         (str_stb),
         .stream_mode (stream_mode),
-        .frame_wrap  (frame_start && frame_ctr == 8'hFF),
+        .frame_wrap  (frame_start && frame_ctr[7:0] == 8'hFF),
         .pmod_type   (pmod_type),
         .pal_params  (pal_params),
         .preset_idx  (preset_idx),

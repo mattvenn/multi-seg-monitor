@@ -6,14 +6,14 @@ depth 5
 smtbmc
 
 [script]
-read -formal -D FORMAL_WE_RE multi_seg_monitor.v VgaSyncGen.v line_buffer.v seg7_rom.v stream_in.v palette.v palette_presets.v config_port.v
+read -formal -D FORMAL_WE_RE multi_seg_monitor.v VgaSyncGen.v line_buffer.v zoneplate.v stream_in.v palette.v palette_presets.v config_port.v
 prep -top multi_seg_monitor
 
 [files]
 ../src/multi_seg_monitor.v
 ../src/VgaSyncGen.v
 ../src/line_buffer.v
-../src/seg7_rom.v
+../src/zoneplate.v
 ../src/stream_in.v
 ../src/palette.v
 ../src/palette_presets.v

@@ -219,6 +219,39 @@ async def test_render_frame(dut):
     check_gold(dut, "generator.png", width, height, px)
 
 
+@rtl_only
+async def test_generator_matches_zoneplate_model(dut):
+    """The generator's zone plate is the one tools/attract_proto.py draws, at
+    its defaults, segment for segment. The gold image only says the picture
+    hasn't changed; this says it's the model's picture, at the frame number
+    the chip was on -- which is what makes attract_proto the reference for
+    tuning it. frame_ctr has advanced once more by the time the capture
+    closes, so the captured frame is the one before."""
+    import attract_proto
+
+    cocotb.start_soon(Clock(dut.clk, CLK_PS, unit="ps").start())
+    await reset(dut)
+    await capture_frame(dut)
+    frame = int(dut.user_project.core.frame_ctr.value) - 1
+
+    width, _, px = read_ppm("frame.ppm")
+    model = attract_proto.zoneplate_frame(frame, **attract_proto.default_params("zoneplate"))
+    bad = []
+    for row in range(ROWS):
+        for col in range(COLS):
+            for seg in range(8):
+                x, y = segments.segment_centre(col, row, seg)
+                got = px[(y * width + x) * 3] // 17
+                want = 0 if seg == 7 else model(col * CELL_W + attract_proto.SEG_CX[seg],
+                                                row * CELL_H + attract_proto.SEG_CY[seg])
+                if got != want:
+                    bad.append((col, row, seg, got, want))
+    assert not bad, (
+        f"{len(bad)} segments differ from attract_proto zoneplate frame {frame}; "
+        f"first (col, row, seg, got, want): {bad[:5]}"
+    )
+
+
 # --------------------------------------------------------------------------
 # Stream port
 #

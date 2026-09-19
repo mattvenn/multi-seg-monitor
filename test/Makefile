@@ -19,7 +19,7 @@ VERILOG_SOURCES += $(SRC_DIR)/palette_presets.v
 VERILOG_SOURCES += $(SRC_DIR)/config_port.v
 VERILOG_SOURCES += $(SRC_DIR)/VgaSyncGen.v
 VERILOG_SOURCES += $(SRC_DIR)/line_buffer.v
-VERILOG_SOURCES += $(SRC_DIR)/seg7_rom.v
+VERILOG_SOURCES += $(SRC_DIR)/zoneplate.v
 VERILOG_SOURCES += $(SRC_DIR)/stream_in.v
 
 # Swap the inferred array for the IHP macro, which is what the ASIC build
@@ -90,10 +90,15 @@ delay-sweep: testcard.seg
 # PHONY because test/gold/ is a directory of the same name: without this,
 # make sees it already exists and does nothing.
 .PHONY: gold delay-sweep
+# No `$` anchor in the filter: the sub-make pastes it into a recipe, where
+# `$|` is make's order-only-prerequisites variable and expands to nothing,
+# gluing the first two names into one pattern that matched no test -- so
+# generator.png and generator_tinyvga.png were silently never rewritten.
+# Every test_render_frame* test has gold, so the bare prefix is the right set.
 gold: testcard.seg
 	rm -f results.xml
 	GOLD_UPDATE=1 DELAY_SWEEP=1 \
-	    COCOTB_TEST_FILTER='"test_render_frame$$|test_render_frame_tiny_vga|test_render_frame_palette2|test_stream_frame|test_stream_delay_0000us"' \
+	    COCOTB_TEST_FILTER='"test_render_frame|test_stream_frame|test_stream_delay_0000us"' \
 	    $(MAKE)
 
 # testcard.seg is committed, so this only fires if it has been deleted.  The

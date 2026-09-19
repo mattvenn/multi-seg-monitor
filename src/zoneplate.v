@@ -1,0 +1,191 @@
+`default_nettype none
+//
+// Zone plate -- the internal generator's picture.
+//
+// Two points wander the screen on triangle-wave Lissajous paths, and every
+// segment's brightness is the sum of its squared distances to them, scaled and
+// folded into a triangle wave, minus time: rings that tighten outward and flow
+// as the frame counter runs. tools/attract_proto.py's zoneplate_frame() is the
+// bit-exact model (its defaults: ring_shift 13, drift 4, phase_speed 4, two
+// sources) and test_multi_seg.py compares a captured frame against it.
+//
+// Nothing here is stored per pixel: each segment's level is a pure function of
+// its position and the frame number, so the chip still holds no framebuffer.
+// The generator asks for one line-buffer byte -- two segments -- at a time and
+// writes it when `ready` rises; a byte takes ~12 cycles against the ~66 a
+// digit row allows per byte, so the row is still built well before it is
+// drawn.
+//
+// Cost is the squarer. It is shared by all four squares a sample needs, one
+// per cycle, which is also why the source points are worked out once per
+// frame into registers rather than per sample: four Lissajous points
+// computed in parallel were ~7k um^2 of adders on their own.
+//
+module zoneplate (
+    input  wire        clk,
+    input  wire        rst_n,
+    input  wire        frame_start,  // work out this frame's source points
+    input  wire [13:0] frame,        // already advanced for this frame
+    input  wire        abort,        // the generator restarted: drop the byte
+    input  wire        want,         // a byte is wanted at (col, row, byte_idx)
+    input  wire        take,         // ...and was written this cycle
+    input  wire [5:0]  col,
+    input  wire [5:0]  row,
+    input  wire [1:0]  byte_idx,
+    output reg         ready,
+    output wire [7:0]  data          // {segment 2*byte_idx+1, segment 2*byte_idx}
+    );
+
+    // ------------------------------------------------------------------
+    // Source points, once per frame
+    //
+    // attract_proto._sources() at drift 4: phases are frame * {24,16,16,20} / 16
+    // (the last two offset by 600 and 1400 so the two points don't move in
+    // step), folded into a 0..2047 triangle, then scaled to the grid:
+    // * 768 >> 11 is * 3 >> 3, and * 592 >> 11 is * 37 >> 7. Only bits
+    // [15:4] of each product matter -- the triangle wraps at 4096 -- so the
+    // products are 16 bits, as shift-and-adds rather than multipliers.
+    // ------------------------------------------------------------------
+    reg  [9:0]  pt [0:3];   // ax, ay, bx, by
+    reg  [2:0]  pi;         // point being worked out; 4 = done
+
+    wire [15:0] f24 = {frame[12:0], 3'b0} + {frame[11:0], 4'b0};
+    wire [15:0] f16 = {frame[11:0], 4'b0};
+    wire [15:0] f20 = {frame[13:0], 2'b0} + {frame[11:0], 4'b0};
+    // verilator lint_off UNUSEDSIGNAL
+    wire [15:0] prod = (pi[1:0] == 2'd0) ? f24 : (pi[1:0] == 2'd3) ? f20 : f16;
+    wire [11:0] ph   = prod[15:4] + (pi[1:0] == 2'd1 ? 12'd600 :
+                                     pi[1:0] == 2'd2 ? 12'd1400 : 12'd0);
+    wire [10:0] tr   = ph[11] ? ~ph[10:0] : ph[10:0];
+    wire [13:0] sx   = tr * 3;
+    wire [16:0] sy   = tr * 37;
+    // verilator lint_on UNUSEDSIGNAL
+    wire [9:0]  new_pt = pi[0] ? sy[16:7] : sx[12:3];
+
+    // ------------------------------------------------------------------
+    // Segment centres
+    //
+    // The centre of each segment rectangle (tools/segments.py SEGMENTS),
+    // rounded down, relative to its cell: a (4,0) b (8,3) c (8,9) d (4,12)
+    // e (0,9) f (0,3) g (4,6). y needs no adder -- CELL_H is 16 and every
+    // offset is under 16 -- and col * 12 is col * 8 + col * 4.
+    // ------------------------------------------------------------------
+    reg        half;        // 0: the byte's low segment, 1: its high one
+    wire [2:0] seg = {byte_idx, half};
+    reg  [3:0] ox, oy;
+    always @* begin
+        case (seg)
+            3'd0:    {ox, oy} = {4'd4, 4'd0};
+            3'd1:    {ox, oy} = {4'd8, 4'd3};
+            3'd2:    {ox, oy} = {4'd8, 4'd9};
+            3'd3:    {ox, oy} = {4'd4, 4'd12};
+            3'd4:    {ox, oy} = {4'd0, 4'd9};
+            3'd5:    {ox, oy} = {4'd0, 4'd3};
+            default: {ox, oy} = {4'd4, 4'd6};   // g; DP (7) is never sampled
+        endcase
+    end
+    wire [9:0] sx_px = {1'b0, col, 3'b0} + {2'b0, col, 2'b0} + {6'b0, ox};
+    wire [9:0] sy_px = {row, oy};
+
+    // ------------------------------------------------------------------
+    // One sample: |dx|^2 + |dy|^2 for each point, a square a cycle
+    //
+    //   st 1: dif = x - ax
+    //   st 2: mag = |dif|,  dif = y - ay
+    //   st 3: acc = mag^2,  mag = |dif|,  dif = x - bx
+    //   st 4: pa  = (acc + mag^2) >> 11,  mag = |dif|,  dif = y - by
+    //   st 5: acc = mag^2,  mag = |dif|
+    //   st 6: level = fold(pa + (acc + mag^2) >> 11 - frame)
+    //
+    // Three registers deep -- difference, magnitude, square -- because on the
+    // iCE40 the segment position (col * 12 + offset), the subtraction and the
+    // negate are three carry chains, and in one cycle with the square they
+    // made 22 MHz (30 with the square in a DSP). Overlapped like this it costs
+    // one cycle a sample, not three. Each sum is shifted before the two are
+    // added, as the model does -- the floors are per point, not of the total.
+    // Only 7 bits of the phase survive the fold, so pa keeps 7.
+    // ------------------------------------------------------------------
+    reg  [2:0]  st;
+    reg  [10:0] dif;
+    reg  [9:0]  mag;
+    reg  [19:0] acc;
+    reg  [6:0]  pa;
+    reg  [3:0]  lo, hi;
+
+    wire        use_b = st >= 3'd3;
+    wire        use_y = st == 3'd2 || st == 3'd4;
+    wire [9:0]  coord = use_y ? sy_px : sx_px;
+    wire [9:0]  p     = pt[{use_b, use_y}];
+    wire [10:0] new_dif = {1'b0, coord} - {1'b0, p};
+    // verilator lint_off UNUSEDSIGNAL
+    wire [10:0] ndif  = -dif;
+    wire [9:0]  amag  = dif[10] ? ndif[9:0] : dif[9:0];
+    wire [19:0] sq    = mag * mag;
+    wire [20:0] sum   = {1'b0, acc} + {1'b0, sq};
+    wire [6:0]  v     = pa + sum[17:11] - frame[6:0];
+    // verilator lint_on UNUSEDSIGNAL
+    wire [3:0]  level = v[6] ? ~v[5:2] : v[5:2];  // attract_proto.tri(v, 7) >> 2
+
+    assign data = {hi, lo};
+
+    // dif and mag load every cycle, with no enable: the sample states run one
+    // a cycle without stalling, so free-running they hold exactly what the
+    // table above says, and garbage the rest of the time that nothing reads.
+    // An enable would hang the whole FSM priority chain -- frame_start, the
+    // row-start abort -- off the DSP's input register on the iCE40.
+    always @(posedge clk) begin
+        dif <= new_dif;
+        mag <= amag;
+    end
+
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            pi    <= 3'd4;
+            st    <= 0;
+            ready <= 1'b0;
+        end else if (frame_start) begin
+            // frame advances on this edge, so the points start next cycle.
+            pi    <= 3'd0;
+            st    <= 0;
+            ready <= 1'b0;
+        end else if (pi != 3'd4) begin
+            pt[pi[1:0]] <= new_pt;
+            pi <= pi + 1'b1;
+        end else if (abort) begin
+            st    <= 0;
+            ready <= 1'b0;
+        end else begin
+            if (take)
+                ready <= 1'b0;
+            case (st)
+                3'd0: if (want && !ready && !take) begin
+                    half <= 1'b0;
+                    st   <= 3'd1;
+                end
+                3'd1: st <= 3'd2;
+                3'd2: st <= 3'd3;
+                3'd3: begin acc <= sq; st <= 3'd4; end
+                3'd4: begin pa <= sum[17:11]; st <= 3'd5; end
+                3'd5: begin acc <= sq; st <= 3'd6; end
+                3'd6: begin
+                    if (!half) begin
+                        lo   <= level;
+                        half <= 1'b1;
+                        // Segment 7 is the decimal point, which the zone
+                        // plate leaves dark: no need to sample it.
+                        if (byte_idx == 2'd3) begin
+                            hi <= 4'd0; ready <= 1'b1; st <= 3'd0;
+                        end else begin
+                            st <= 3'd1;
+                        end
+                    end else begin
+                        hi <= level; ready <= 1'b1; st <= 3'd0;
+                    end
+                end
+                default: st <= 0;
+            endcase
+        end
+    end
+
+endmodule
+`default_nettype wire

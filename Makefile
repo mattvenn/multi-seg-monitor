@@ -22,7 +22,7 @@ SOURCES  = src/tt_um_multi_seg_monitor.v \
            src/config_port.v \
            src/VgaSyncGen.v \
            src/line_buffer.v \
-           src/seg7_rom.v \
+           src/zoneplate.v \
            src/stream_in.v
 
 BUILD    = build
@@ -45,7 +45,7 @@ $(BUILD)/$(TOP).json: src/_tt_fpga_top.v $(SOURCES)
 	@mkdir -p $(BUILD)
 	yosys -l $(BUILD)/01-synth.log -DSYNTH \
 	    -p "read_verilog -sv src/_tt_fpga_top.v $(SOURCES); \
-	        synth_ice40 -top tt_fpga_top -json $@"
+	        synth_ice40 -dsp -top tt_fpga_top -json $@"
 
 $(BUILD)/$(TOP).asc: $(BUILD)/$(TOP).json
 	nextpnr-ice40 -l $(BUILD)/02-nextpnr.log --pcf-allow-unconstrained \
