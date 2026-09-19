@@ -96,8 +96,11 @@ module palette_curve (
     // the product would be self-determined, i.e. only 5 bits wide.
     wire [8:0] prod = dx * m;
 
-    // 15*31 + 15*8 + 4 = 589 fits in 10 bits.
+    // 15*31 + 15*8 + 4 = 589 fits in 10 bits. The low 3 bits are the eighths
+    // the slopes are counted in, discarded below.
+    // verilator lint_off UNUSEDSIGNAL
     wire [9:0] sum = {1'b0, prod} + {3'b0, base};
+    // verilator lint_on UNUSEDSIGNAL
 
     always @(posedge clk)
         c <= zero         ? 4'd0  :  // rule 1, see header

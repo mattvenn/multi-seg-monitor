@@ -79,7 +79,7 @@ module tt_um_multi_seg_monitor (
     );
 
     // verilator lint_off UNUSEDSIGNAL
-    wire _unused = &{ena, 1'b0};
+    wire _unused = &{ena, uio_in[5:0], 1'b0};  // uio[5:0] are outputs
     // verilator lint_on UNUSEDSIGNAL
 
 endmodule

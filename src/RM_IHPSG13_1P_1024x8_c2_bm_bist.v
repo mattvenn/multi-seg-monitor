@@ -13,6 +13,9 @@
 //
 // Ports must stay in step with the macro: 1024 x 8, single port, plus BIST.
 //
+// The ASIC flow's lint step also reads its own blackbox of the macro, generated
+// from the same liberty/LEF, so this is a known duplicate declaration.
+// verilator lint_off MODDUP
 module RM_IHPSG13_1P_1024x8_c2_bm_bist (
     input A_CLK,
     input A_MEN,
@@ -34,3 +37,4 @@ module RM_IHPSG13_1P_1024x8_c2_bm_bist (
 );
 
 endmodule
+// verilator lint_on MODDUP

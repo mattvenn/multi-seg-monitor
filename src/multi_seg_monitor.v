@@ -48,13 +48,16 @@ module multi_seg_monitor (
         .vsync       (vga_vsync),
         .x_px        (x_px),
         .y_px        (y_px),
+        // Unused on purpose: the range checks below serve as the active flag
+        // instead, in the same pipeline stage as the coordinates.
+        // verilator lint_off PINCONNECTEMPTY
         .activevideo ()
+        // verilator lint_on PINCONNECTEMPTY
     );
 
     // x_px and y_px are registered inside VgaSyncGen and underflow to large
     // values during blanking, so range checks on them serve as active video flags
     // while staying in the same pipeline stage as the coordinates themselves.
-    wire h_active = (x_px < 800);
     wire cell_x   = (x_px >= MARGIN_X) && (x_px < MARGIN_X + COLS * CELL_W);
     wire cell_y   = (y_px >= MARGIN_Y) && (y_px < MARGIN_Y + ROWS * CELL_H);
 
@@ -154,7 +157,10 @@ module multi_seg_monitor (
     // being read.  Writes take whatever cycles the renderer is not using, so a
     // row's 256 bytes are placed long before that row is needed.
     // ------------------------------------------------------------------
+    // 6 bits to count 37 rows, but the pattern only mixes in the low 4.
+    // verilator lint_off UNUSEDSIGNAL
     reg [5:0] gen_row;
+    // verilator lint_on UNUSEDSIGNAL
     reg [7:0] gen_ptr;
     reg [1:0] gen_buf;
     reg       gen_busy;
@@ -197,7 +203,9 @@ module multi_seg_monitor (
         end
     end
 
-    wire [5:0] gen_col  = gen_ptr[7:2];
+    // verilator lint_off UNUSEDSIGNAL
+    wire [5:0] gen_col  = gen_ptr[7:2];  // likewise 64 columns, low 4 used
+    // verilator lint_on UNUSEDSIGNAL
     wire [1:0] gen_byte = gen_ptr[1:0];
     wire [3:0] gen_val  = gen_col[3:0] + gen_row[3:0] + frame_ctr[7:4];
     wire [6:0] gen_segs;
@@ -253,8 +261,10 @@ module multi_seg_monitor (
     // Reset strap, config packet and palette state -- see config_port.v.
     // ------------------------------------------------------------------
     wire [53:0] pal_params;
+    // verilator lint_off UNUSEDSIGNAL
     wire [2:0]  preset_idx;  // only read by the tests, via the hierarchy
     wire        cycle_en;    // likewise
+    // verilator lint_on UNUSEDSIGNAL
 
     config_port cfg (
         .clk         (clk),
