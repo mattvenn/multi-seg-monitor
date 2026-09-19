@@ -6,10 +6,7 @@ formal/stream_in/
 formal/config_port/
 formal/config_port_prove/
 formal/config_port_cover/
-formal/lb_exclusivity/
-formal/zone_exclusivity/
 formal/vga_counter_bounds/
-formal/buf_isolation/
 test/frame.ppm
 test/frame.png
 *.vcd
