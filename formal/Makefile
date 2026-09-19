@@ -4,9 +4,9 @@
 
 SBY = sby -f
 
-.PHONY: all stream_in config_port vga_counter_bounds clean
+.PHONY: all stream_in config_port lb_exclusivity zone_exclusivity vga_counter_bounds clean
 
-all: stream_in config_port vga_counter_bounds
+all: stream_in config_port lb_exclusivity zone_exclusivity vga_counter_bounds
 
 stream_in:
 	$(SBY) stream_in.sby
@@ -14,8 +14,14 @@ stream_in:
 config_port:
 	$(SBY) config_port.sby
 
+lb_exclusivity:
+	$(SBY) lb_exclusivity.sby
+
+zone_exclusivity:
+	$(SBY) zone_exclusivity.sby
+
 vga_counter_bounds:
 	$(SBY) vga_counter_bounds.sby
 
 clean:
-	rm -rf stream_in config_port_prove config_port_cover vga_counter_bounds
+	rm -rf stream_in config_port_prove config_port_cover lb_exclusivity zone_exclusivity vga_counter_bounds

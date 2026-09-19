@@ -1,0 +1,20 @@
+[options]
+mode bmc
+depth 5
+
+[engines]
+smtbmc
+
+[script]
+read -formal -D FORMAL_ZONE multi_seg_monitor.v VgaSyncGen.v line_buffer.v seg7_rom.v stream_in.v palette.v palette_presets.v config_port.v
+prep -top multi_seg_monitor
+
+[files]
+../src/multi_seg_monitor.v
+../src/VgaSyncGen.v
+../src/line_buffer.v
+../src/seg7_rom.v
+../src/stream_in.v
+../src/palette.v
+../src/palette_presets.v
+../src/config_port.v

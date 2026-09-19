@@ -412,14 +412,15 @@ module multi_seg_monitor (
     end
 
 `ifdef FORMAL
-    // `read_verilog -formal` defines FORMAL in place of SYNTHESIS. Each
-    // property below is compiled in only when its own guard macro is -D'd,
-    // so the three stay independent of each other despite living in one
-    // module. No formal/*.sby runs them any more: their three .sby files
-    // (lb_exclusivity, zone_exclusivity, buf_isolation) stopped building
-    // when palette.v and config_port.v were added, and were removed rather
-    // than kept broken -- git history has them. A .sby for one needs the
-    // full core file list, not just the modules the property touches.
+    // `read_verilog -formal` (see formal/) defines FORMAL in place of
+    // SYNTHESIS. Each property below is compiled in only by the one
+    // formal/*.sby run that -D's its own guard macro, so the three proofs
+    // stay independent of each other despite living in one module. Each
+    // .sby has to list every file the core instantiates, not just the ones
+    // its property touches: lb_exclusivity and zone_exclusivity silently
+    // stopped building when palette.v and config_port.v went in without
+    // being added to them. FORMAL_BUF has no .sby (buf_isolation.sby, in
+    // git history, only ever documented the failure described below).
 
 `ifdef FORMAL_WE_RE
     // we and re must never be high in the same cycle (line_buffer.v): on
