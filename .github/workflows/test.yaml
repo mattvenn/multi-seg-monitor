@@ -46,6 +46,12 @@ jobs:
       - name: Run converter tests
         run: cd tools && python3 test_video2seg.py
 
+      # Includes the check that src/palette_presets.v is still generated from
+      # tools/palette_builder/presets.json, and that the firmware's copy of
+      # the config-packet encoder matches tools/segments.py.
+      - name: Run palette tests
+        run: cd tools && python3 test_palettes.py && python3 palette_builder/test_palette_builder.py
+
       - name: Test Summary
         uses: test-summary/action@v2.4
         with:

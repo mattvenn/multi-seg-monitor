@@ -1,0 +1,24 @@
+# The config packet protocol (src/config_port.v): which events may change
+# which state, and exactly what each packet byte does to the palette, for
+# any host behaviour -- data/strobe/mode are free inputs. `prove` closes by
+# k-induction; `cover` shows a whole good packet and a preset-cycle tick are
+# actually reachable, so the asserts aren't passing vacuously.
+[tasks]
+prove
+cover
+
+[options]
+prove: mode prove
+cover: mode cover
+cover: depth 20
+
+[engines]
+smtbmc
+
+[script]
+read -formal config_port.v palette_presets.v
+prep -top config_port
+
+[files]
+../src/config_port.v
+../src/palette_presets.v

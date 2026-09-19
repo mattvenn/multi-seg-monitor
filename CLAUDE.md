@@ -29,13 +29,16 @@ override with `TT_TOOLS=`.
 
 ## Commands
 
-    make test                       # cocotb suite + converter tests
+    make test                       # cocotb suite + converter and palette tests
+    make formal                     # SymbiYosys proofs (see formal/Makefile for which pass)
     make bitstream                  # yosys + nextpnr + icepack for the TT FPGA breakout
     make flash PORT=/dev/ttyACM4    # upload to the demoboard (needs tt-support-tools' venv)
 
     make -C test IHP_SRAM=1         # same suite against the IHP macro instead of an inferred array
     make -C test delay-sweep        # vsync latency sweep, ~10 min under icarus, writes frame_delay_*.png
     make -C test gold               # rewrite the gold images after an intended change
+    tools/palette_builder/palette_builder.py              # design palettes (needs Tk + numpy)
+    tools/palette_builder/palette_builder.py --write-rtl  # regenerate src/palette_presets.v
 
 Prefer `SIM=verilator` for the frame-capture tests and `gold` specifically --
 icarus takes 1-4 minutes per frame-capture test, verilator ~35-55s for the
@@ -46,6 +49,13 @@ what CI and the gate-level (`GATES=yes`) run are proven against; verilator is
 opt-in for local iteration:
 
     SIM=verilator make -C test gold
+
+On macOS the Verilator-built `Vtop` loads oss-cad-suite's libpython, which
+looks for its own dependencies at `@executable_path/../lib` -- i.e.
+`test/sim_build/lib`. If a Verilator run dies with `Failed to preload Python
+library`, symlink it: `ln -sfn ~/asic/oss-cad-suite/lib test/sim_build/lib`.
+Also delete `test/sim_build/rtl` when switching `IHP_SRAM` on or off: the
+build is only rebuilt on source timestamps, not on the changed define.
 
 Note `test/Makefile` gates `-g2012` (Icarus) vs `--language 1800-2012`
 (Verilator) on `$(SIM)` -- they're the same language-level flag under
@@ -94,6 +104,17 @@ drawn. Everything below follows from that.
 - **Source mux**: internal generator (`uio[7]` low, needs no external data, is the
   silicon bring-up safety net) or the stream port (`stream_in.v`). The write pointer
   resets on vsync, so the link is self-synchronising.
+- **Config port** (`config_port.v`): while `uio[7]` is low the strobes carry a
+  config packet instead of pixels — Pmod type, preset cycling, and a palette
+  curve. Byte layout is in that file's header and `README.md`. The header's magic
+  nibble (`0xA`) is what stops a floating strobe on a bare board flipping the
+  Pmod. `formal/config_port.sby` proves the protocol on this module alone.
+- **Palette** (`palette.v`) is three per-channel curves, not a table: two lines
+  through a knee, slopes in eighths, clipped at 15 — 54 bits of state rather
+  than the 192 flops a loadable 16x12 table would cost. It is a 2-stage
+  pipeline, and the index is registered before it, so the syncs are delayed 4
+  cycles to match; all of that was needed to get the iCE40 back to ~35 MHz
+  (see FPGA timing below).
 
 ### Pacing is the load-bearing invariant
 
@@ -107,6 +128,18 @@ only the margin above it shrank. This is not theoretical: exceeding it is what t
 picture on hardware, and `make -C test delay-sweep` reproduces it in simulation.
 See "If the picture tears" in `README.md`.
 
+### Palettes are data, generated into RTL
+
+`tools/palette_builder/presets.json` is the source of truth for the 8 built-in
+palettes. `src/palette_presets.v` is **generated** from it (`--write-rtl`) —
+never hand-edit it; `tools/test_palettes.py` fails if the two disagree.
+`tools/segments.py`'s `curve_value()` is the bit-exact model of `palette.v`
+(the cocotb suite checks the RTL against it over the presets and random
+parameter words), and `config_packet()` is the host-side encoder. The firmware
+carries its own copy of that encoder because `mpremote run` can't import
+`tools/`; `test_palettes.py` checks the copy against the original for every legal
+curve.
+
 ### Geometry is written down twice
 
 `src/multi_seg_monitor.v` and `tools/segments.py` both encode the segment
@@ -116,12 +149,13 @@ low-to-high as `a, b, c, d, e, f, g, DP` — host software depends on it.
 
 ### Pinout
 
-Output mode is chosen at reset, not fixed: a config strap on `ui_in[2:0]`,
-sampled every cycle `rst_n` is low and latched once it rises, then reverting
-to plain stream data. `ui_in[0]` picks the physical Pmod, `ui_in[2:1]` pick
-one of `src/palette.v`'s 4 colour palettes (applied in both modes). This is
-the RTL's first reset-time-only pin sample — everything else is read
-continuously.
+Output mode is chosen at reset: a config strap on `ui_in[3:0]`, sampled every
+cycle `rst_n` is low and latched once it rises, then reverting to plain stream
+data. `ui_in[0]` picks the physical Pmod, `ui_in[3:1]` one of 8 built-in
+palettes (applied in both modes). A config packet (see Architecture) can
+override both later; the strap stays because it makes the pins safe from the
+first cycle out of reset — a Tiny VGA board must never see `uio` driven while
+it waits for a packet. Both live in `src/config_port.v`.
 
 **Digilent PmodVGA** (`ui_in[0]=0`, default), video spans `uo_out` *and* `uio`:
 
@@ -130,8 +164,8 @@ continuously.
 | `uo_out[3:0]` / `uo_out[7:4]` | R / B nibbles |
 | `uio[3:0]` | G nibble |
 | `uio[4]` / `uio[5]` | hsync / vsync |
-| `uio[6]` / `uio[7]` | stream strobe / mode select |
-| `ui_in[7:0]` | stream data (bits 2:0 double as the reset strap) |
+| `uio[6]` / `uio[7]` | stream strobe / mode select (low = generator + config packets) |
+| `ui_in[7:0]` | stream data (bits 3:0 double as the reset strap) |
 
 `uio_oe` is `8'b0011_1111`.
 
@@ -146,8 +180,9 @@ fork on the strap. Bit order reconstructed from commit `d7fee74`: `uo_out[7:0]
 
 `SPEC.md` section 7 still describes the pre-strap single-Pmod design and the
 native 6-bit custom Pmod idea (never built); **the RTL, `info.yaml`, `tb.v`
-and `firmware/seg_player.py` are the truth.** Moving these pins, or the
-strap's bit assignment, breaks all four at once.
+and `firmware/seg_player.py` are the truth.** Moving these pins, the strap's
+bit assignment or the config packet layout breaks all four at once (plus
+`tools/segments.py` for the packet).
 
 ## Testing approach
 
@@ -184,6 +219,22 @@ and the macro placement at `[42, 80]` `R90` has survived all three unchanged. `R
 is not optional — the macro is 336.46 µm tall upright, which does not fit in
 313.74 µm of die height. At 2x2 the macro is 38% of the die, so placement density and
 routing congestion around it are the things to watch, not the coordinate.
+
+Area budget, from CI run 35371778615 before the curve palette went in: 58%
+utilisation (macro 49.4k µm², standard cells 24.3k placed of 126.7k core), and
+placement adds about x1.4 over synthesised area. The curve palette and config
+port added ~9.9k µm² synthesised (172 -> 271 flops), so expect ~69%. An IHP
+`dfrbpq_1` flop is 49 µm² — flops are the expensive thing here.
+
+### FPGA timing
+
+nextpnr's 40 MHz check fails on `main` and always has (36.7 MHz before the
+curve palette, 33.7-35.2 MHz across seeds after it); the board has been run at
+40 MHz with a ~35 MHz report without trouble, so treat that as the bar rather
+than the pass/fail line. The palette is no longer the critical path — the
+generator's `y_px` -> `gen_busy` enable is. Note `make bitstream` stops at
+that nextpnr error before `icepack`, on `main` too (checked locally with seed
+0), so a flashable `.bin` needs nextpnr's `--timing-allow-fail`.
 
 ## Conventions
 

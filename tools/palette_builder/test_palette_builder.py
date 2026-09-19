@@ -10,11 +10,9 @@ repo -- no simulator is run.
     python3 test_palette_builder.py
 """
 
-import ast
 import json
 import os
 import random
-import re
 import sys
 import tempfile
 
@@ -28,9 +26,13 @@ sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 
 import palette_builder as pb
+from pathlib import Path
 import png
 import seg2png
 import segments
+
+
+HERE_P = Path(HERE)
 
 
 def _random_frame(seed=1):
@@ -89,19 +91,19 @@ def test_lut_arithmetic_matches_the_two_pmods():
 
 
 def test_real_palettes_pass_and_grey_flags_only_six_bit():
-    # The tinted palettes (blue/green/purple) put black at entries 0 and 1 on
-    # purpose and are smooth ramps, so they collapse on the 6-bit Pmod too:
-    # expect exactly the 12-bit "0, 1" warning plus a 6-bit one, nothing else.
-    for n in (1, 2, 3):
+    # The tinted presets put black at entries 0 and 1 on purpose and are
+    # smooth ramps, so they collapse on the 6-bit Pmod too: expect exactly the
+    # 12-bit "0, 1" warning plus a 6-bit one, nothing else.
+    for n in range(1, segments.N_PRESETS):
         warns = pb.check_palette(segments.PALETTES[n])
-        assert len(warns) == 2, warns
+        assert len(warns) == 2, (n, warns)
         assert warns[0].startswith("12-bit") and warns[0].endswith("0, 1"), warns
         assert warns[1].startswith("6-bit"), warns
     warns = pb.check_palette(segments.PALETTES[0])
     assert len(warns) == 1 and "6-bit" in warns[0]  # the documented exemption
 
 
-def test_check_palette_flags_collisions_and_non_black_zero():
+def test_check_palette_flags_collisions_non_black_zero_and_dimming():
     pal = [list(c) for c in segments.PALETTES[1]]
     pal[3] = list(pal[5])
     msgs = " | ".join(pb.check_palette(pal))
@@ -109,6 +111,9 @@ def test_check_palette_flags_collisions_and_non_black_zero():
     pal = [list(c) for c in segments.PALETTES[1]]
     pal[0] = [1, 0, 0]
     assert any("entry 0" in m for m in pb.check_palette(pal))
+    pal = [list(c) for c in segments.PALETTES[3]]
+    pal[9], pal[10] = pal[10], pal[9]
+    assert any("brightness falls at entries: 10" in m for m in pb.check_palette(pal))
 
 
 def test_six_bit_only_collision_is_reported_as_six_bit_only():
@@ -117,6 +122,30 @@ def test_six_bit_only_collision_is_reported_as_six_bit_only():
     msgs = pb.check_palette(pal)
     assert any("6-bit" in m for m in msgs)
     assert not any("12-bit" in m for m in msgs)
+
+
+def test_curve_table_is_the_chips_quantised_curve():
+    for preset, table in zip(segments.PRESETS, segments.PALETTES):
+        assert pb.curve_table(preset) == table
+
+
+def test_fit_curve_recovers_every_preset_exactly():
+    """Any table a curve can draw, fit_curve finds a curve that draws it --
+    not necessarily the same points, but the same 16 entries."""
+    for table in segments.PALETTES:
+        assert pb.curve_table(pb.fit_curve(table)) == table
+
+
+def test_fit_curve_on_the_old_tables_is_close():
+    """The pre-curve blue/green/purple tables in palettes/ still open, fitted.
+    Every channel lands within 1 of the old value at every entry."""
+    for name in ("blue", "green", "purple"):
+        curve, fitted = pb.from_json((HERE_P / "palettes" / f"{name}.json").read_text())
+        assert fitted
+        old = json.loads((HERE_P / "palettes" / f"{name}.json").read_text())["entries"]
+        got = pb.curve_table(curve)
+        worst = max(abs(a - b) for e, g in zip(old, got) for a, b in zip(e, g))
+        assert worst <= 1, (name, worst)
 
 
 def test_gradient_endpoints_and_spacing():
@@ -137,35 +166,55 @@ def test_gradient_rejects_bad_input():
         raise AssertionError(f"accepted {bad}")
 
 
-def test_export_python_round_trips():
-    pal = segments.PALETTES[2]
-    text = pb.to_python(pal, "mine")
-    value = ast.literal_eval(text.split("=", 1)[1].strip())
-    assert [tuple(c) for c in value] == [tuple(c) for c in pal]
-
-
-def test_export_verilog_matches_palette_v_style_and_round_trips():
-    pal = segments.PALETTES[1]
-    text = pb.to_verilog(pal, 1)
-    assert text.startswith("// palette 1\n2'd1: case (idx)\n")
-    assert "    4'd0 : {r, g, b} = {4'd0, 4'd0, 4'd0};" in text  # padding as in src/palette.v
-    assert "    4'd10: {r, g, b} =" in text
-    assert text.rstrip().endswith("endcase")
-    got = {}
-    for m in re.finditer(r"4'd(\d+)\s*: \{r, g, b\} = \{4'd(\d+), 4'd(\d+), 4'd(\d+)\};", text):
-        got[int(m[1])] = tuple(int(m[i]) for i in (2, 3, 4))
-    assert [got[i] for i in range(16)] == [tuple(c) for c in pal]
-
-
 def test_json_round_trip_and_validation():
-    pal = segments.PALETTES[3]
-    assert pb.from_json(pb.to_json(pal, "x")) == [tuple(c) for c in pal]
-    for bad in ('{"entries": []}', '{"entries": [[0,0,0]]}', '{"entries": ' + json.dumps([[0, 0, 16]] * 16) + "}"):
+    curve = {ch: list(segments.PRESETS[7][ch]) for ch in "rgb"}
+    assert pb.from_json(pb.to_json(curve, "x")) == (curve, False)
+    bad_table = '{"entries": ' + json.dumps([[0, 0, 16]] * 16) + "}"
+    bad_curve = '{"r": [0, 3, 5, 5], "g": [8, 8, 15, 15], "b": [8, 8, 15, 15]}'
+    for bad in ('{"entries": []}', '{"entries": [[0,0,0]]}', bad_table, bad_curve, '{"r": [1, 2]}'):
         try:
             pb.from_json(bad)
         except ValueError:
             continue
         raise AssertionError(f"accepted {bad}")
+
+
+def test_save_preset_and_write_rtl_round_trip():
+    """Saving into a slot keeps the file loadable and one-preset-per-line,
+    and the RTL generated from it matches what segments.py would generate."""
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "presets.json")
+        with open(segments.PRESETS_JSON) as f:
+            original = f.read()
+        with open(path, "w") as f:
+            f.write(original)
+        curve = {"r": [4, 2, 15, 15], "g": [14, 0, 15, 0], "b": [14, 0, 15, 0]}
+        pb.save_preset(curve, 5, "test", path=path)
+        presets = segments.load_presets(path)
+        assert presets[5] == {"name": "test", **curve}
+        assert [p for i, p in enumerate(presets) if i != 5] == [
+            p for i, p in enumerate(segments.PRESETS) if i != 5
+        ]
+        with open(path) as f:
+            assert len(f.read().splitlines()) == len(original.splitlines())
+        # The checked-in file round-trips byte for byte through save_preset.
+        pb.save_preset(segments.PRESETS[5], 5, segments.PRESETS[5]["name"], path=path)
+        with open(path) as f:
+            assert f.read() == original
+        try:
+            pb.save_preset({"r": [0, 3, 5, 5], "g": curve["g"], "b": curve["b"]}, 0, "bad", path=path)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("save_preset accepted a curve the chip can't draw")
+
+
+def test_export_carries_a_working_packet():
+    curve = {ch: list(segments.PRESETS[4][ch]) for ch in "rgb"}
+    text = pb.export_text(curve, "amber")
+    packet = segments.config_packet(segments.points_to_params(curve))
+    assert packet.hex(" ") in text
+    assert "main(curve=((1, 0, 8, 15), (1, 0, 15, 10), (10, 0, 15, 5)))" in text
 
 
 def test_list_clips_keeps_only_current_geometry():

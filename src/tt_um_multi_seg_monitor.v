@@ -13,27 +13,11 @@ module tt_um_multi_seg_monitor (
     wire [3:0] r, g, b;
     wire hsync, vsync;
 
-    // Reset-time config strap. ui_in carries stream data whenever rst_n is
-    // high, but nothing drives the stream while the core is held in reset --
-    // true in every historical and current pinout, since the write pointer
-    // and stream logic are all reset -- so 3 of its bits are free to sample
-    // once, during the reset window, and latch for the rest of the chip's
-    // life. This is new for this RTL: nothing else here samples a pin only
-    // at reset; every other input is read continuously.
-    //
-    // ui_in[0]   pmod_type:   0 = Digilent PmodVGA (default), 1 = Tiny VGA Pmod
-    // ui_in[2:1] palette_sel: which of palette.v's 4 colour palettes
-    //
-    // Bits 0-2 rather than e.g. 7-5 for no reason but readability -- any 3
-    // bits idle during reset would do. The register re-samples every cycle
-    // rst_n is low, so the *last* value ui_in holds before rst_n rises is
-    // what sticks, not the first; the host must hold its chosen strap value
-    // for the whole reset pulse, not just assert it once at the start.
-    reg       pmod_type;
-    reg [1:0] palette_sel;
-
-    always @(posedge clk)
-        if (!rst_n) {palette_sel, pmod_type} <= ui_in[2:0];
+    // Which Pmod the pins are laid out for. Chosen by a reset-time strap on
+    // ui_in[0] and optionally changed later by a config packet; both live in
+    // the core, alongside the palette settings they share a packet with --
+    // see src/config_port.v. Everything below is pure pin mapping on top of it.
+    wire pmod_type;
 
     // Digilent PmodVGA (4 bits/channel), spanning uo_out and the low 6 bits
     // of uio -- R/B on uo_out, G/HS/VS on uio, matching how the board's two
@@ -86,7 +70,7 @@ module tt_um_multi_seg_monitor (
         .stream_data (ui_in),
         .stream_stb  (uio_in[6]),
         .stream_mode (uio_in[7]),
-        .palette_sel (palette_sel),
+        .pmod_type   (pmod_type),
         .hsync       (hsync),
         .vsync       (vsync),
         .r           (r),

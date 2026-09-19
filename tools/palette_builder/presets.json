@@ -1,0 +1,13 @@
+{
+ "comment": "The chip's 8 built-in palettes, in strap/cycle order. Each channel is two points [x1, y1, x2, y2]: a line from (0,0) to the knee (x1,y1), then a line through (x2,y2) that carries on until it clips at 15. Edit with palette_builder.py, then run `palette_builder.py --write-rtl` to regenerate src/palette_presets.v.",
+ "presets": [
+  {"name": "grey", "r": [8, 8, 15, 15], "g": [8, 8, 15, 15], "b": [8, 8, 15, 15]},
+  {"name": "blue", "r": [8, 0, 15, 15], "g": [1, 0, 7, 7], "b": [1, 0, 8, 15]},
+  {"name": "green", "r": [8, 0, 15, 15], "g": [1, 0, 2, 2], "b": [1, 0, 5, 5]},
+  {"name": "purple", "r": [1, 0, 8, 15], "g": [8, 0, 15, 15], "b": [1, 0, 8, 15]},
+  {"name": "amber", "r": [1, 0, 8, 15], "g": [1, 0, 15, 10], "b": [10, 0, 15, 5]},
+  {"name": "red", "r": [1, 0, 8, 15], "g": [8, 0, 15, 15], "b": [8, 0, 15, 15]},
+  {"name": "cyan", "r": [8, 0, 15, 15], "g": [1, 0, 8, 15], "b": [1, 0, 8, 15]},
+  {"name": "fire", "r": [1, 0, 6, 15], "g": [5, 0, 11, 15], "b": [11, 0, 15, 15]}
+ ]
+}

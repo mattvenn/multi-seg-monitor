@@ -15,6 +15,8 @@ SIM_BUILD = sim_build/rtl
 VERILOG_SOURCES += $(SRC_DIR)/tt_um_multi_seg_monitor.v
 VERILOG_SOURCES += $(SRC_DIR)/multi_seg_monitor.v
 VERILOG_SOURCES += $(SRC_DIR)/palette.v
+VERILOG_SOURCES += $(SRC_DIR)/palette_presets.v
+VERILOG_SOURCES += $(SRC_DIR)/config_port.v
 VERILOG_SOURCES += $(SRC_DIR)/VgaSyncGen.v
 VERILOG_SOURCES += $(SRC_DIR)/line_buffer.v
 VERILOG_SOURCES += $(SRC_DIR)/seg7_rom.v
@@ -85,6 +87,9 @@ delay-sweep: testcard.seg
 # Rewrite the gold images after an intended change to the picture.  Only the
 # three deterministic captures have gold; look at what this produces before
 # committing it, because nothing else will.
+# PHONY because test/gold/ is a directory of the same name: without this,
+# make sees it already exists and does nothing.
+.PHONY: gold delay-sweep
 gold: testcard.seg
 	rm -f results.xml
 	GOLD_UPDATE=1 DELAY_SWEEP=1 \

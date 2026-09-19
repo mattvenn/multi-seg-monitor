@@ -67,8 +67,8 @@ def main():
         "--palette",
         type=int,
         default=0,
-        choices=(0, 1, 2, 3),
-        help="which of src/palette.v's 4 palettes (0 = today's grey)",
+        choices=range(len(segments.PALETTES)),
+        help="which of the 8 built-in palettes (tools/palette_builder/presets.json; 0 = grey)",
     )
     args = ap.parse_args()
 

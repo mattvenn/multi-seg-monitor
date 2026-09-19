@@ -4,15 +4,18 @@
 
 SBY = sby -f
 
-.PHONY: all stream_in lb_exclusivity zone_exclusivity vga_counter_bounds buf_isolation clean
+.PHONY: all stream_in config_port lb_exclusivity zone_exclusivity vga_counter_bounds buf_isolation clean
 
 # buf_isolation is deliberately not part of `all`: it fails at the basecase
 # itself (step 1, see the comment in buf_isolation.sby), not just an
 # induction step that won't close -- run it explicitly.
-all: stream_in lb_exclusivity zone_exclusivity vga_counter_bounds
+all: stream_in config_port lb_exclusivity zone_exclusivity vga_counter_bounds
 
 stream_in:
 	$(SBY) stream_in.sby
+
+config_port:
+	$(SBY) config_port.sby
 
 lb_exclusivity:
 	$(SBY) lb_exclusivity.sby
@@ -27,4 +30,4 @@ buf_isolation:
 	$(SBY) buf_isolation.sby
 
 clean:
-	rm -rf stream_in lb_exclusivity zone_exclusivity vga_counter_bounds buf_isolation
+	rm -rf stream_in config_port_prove config_port_cover lb_exclusivity zone_exclusivity vga_counter_bounds buf_isolation

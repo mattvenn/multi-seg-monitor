@@ -19,16 +19,18 @@ reasoning behind it, and [resolution_discussion.md](resolution_discussion.md) se
 
 * Data to display
 * Levels of brightness — 4 bits per segment, sent through a colour palette (see
-  below) rather than a single-channel gamma stage: a 4-bit DAC can't fit a
-  non-trivial *single-channel* curve and still keep all 16 stored levels distinct
-  (pigeonhole -- see the comment in `src/palette.v`), which is why palette 0
-  reproduces the old direct-to-DAC mapping exactly rather than warping it.
-* Colour — a reset-time strap, not a runtime or per-pixel control. At reset,
-  `ui_in[0]` picks the physical Pmod (Digilent PmodVGA's 4 bits/channel, or the
-  classic Tiny Tapeout VGA Pmod's 2 bits/channel) and `ui_in[2:1]` picks one of 4
-  preset colour palettes (`src/palette.v`) applied to every segment alike — still
-  a whole-display choice, not per-segment colour, since every display this
-  imitates is single colour anyway. See "Reset-time config strap" below.
+  below). A palette is three per-channel curves, each two straight lines through
+  a movable knee, clipped at 15 — enough for tinted ramps and basic per-monitor
+  gamma shaping. A 4-bit DAC can't bend a curve and still keep all 16 stored
+  levels distinct (pigeonhole — see the comment in `src/palette.v`), so the knee
+  chooses where levels collide rather than avoiding it; preset 0 is the plain
+  grey identity.
+* Colour — a whole-display choice, not per-segment colour, since every display
+  this imitates is single colour anyway. A reset-time strap picks the physical
+  Pmod and one of 8 built-in palettes; a config packet sent before streaming can
+  override the Pmod and load any curve. With no host the generator cycles
+  through the 8 presets. See "Reset-time config strap" and "Config packet"
+  below, and `tools/palette_builder` to design palettes.
 
 # Status
 
@@ -124,20 +126,39 @@ PmodVGA leaves two pins not connected.
 
 ### Reset-time config strap
 
-`ui_in[2:0]` is sampled once, held for the whole reset pulse, then reverts to
+`ui_in[3:0]` is sampled once, held for the whole reset pulse, then reverts to
 ordinary stream data for the rest of the chip's life:
 
 | Bit | Meaning |
 |---|---|
 | `ui_in[0]` | 0 = Digilent PmodVGA (default), 1 = classic Tiny Tapeout VGA Pmod |
-| `ui_in[2:1]` | which of `src/palette.v`'s 4 colour palettes (0 = today's plain grey) |
+| `ui_in[3:1]` | which of the 8 built-in palettes (`tools/palette_builder/presets.json`): 0 grey, 1 blue, 2 green, 3 purple, 4 amber, 5 red, 6 cyan, 7 fire |
 
 The host must hold its chosen value on these bits for the entire reset pulse,
 not just assert it once — the strap register re-samples every cycle `rst_n`
 is low, so the *last* value before it rises is what sticks. Tiny VGA mode
 only uses `uo_out` (2 bits/channel); `uio[0:5]` go unused and `uio_oe` goes
 all-input in that mode, `uio[6:7]` (strobe/mode select) stay exactly where
-they are in both modes. See `src/tt_um_multi_seg_monitor.v` and `src/palette.v`.
+they are in both modes. See `src/config_port.v` and `src/palette.v`.
+
+### Config packet
+
+With `uio[7]` low the internal generator draws the picture, and each strobe on
+`uio[6]` carries a config byte instead of a pixel byte. Every fall of `uio[7]`
+starts a new packet:
+
+| Byte | Contents |
+|---|---|
+| 0 | header `{4'hA, load_preset, cycle_en, 0, pmod_type}` — without the `A` the whole packet is ignored, so a stray strobe on a bare board can't flip the Pmod |
+| 1–3 | red curve: `{knee_x, knee_y}`, `m1`, `m2` (slopes in eighths, 5 bits) |
+| 4–6 | green, the same |
+| 7–9 | blue, the same |
+
+A header alone is enough to change the Pmod or turn preset cycling on or off;
+`load_preset` puts the strapped preset back. The generator steps to the next
+preset every 256 frames (~4 s) until a packet turns cycling off. `firmware/`'s
+`main(curve=...)` sends one for you; `tools/segments.py`'s `config_packet()`
+builds one from Python, and `tools/palette_builder` exports the exact bytes.
 
 **1. Internal generator, no firmware.** Leave `uio[7]` low and the design ignores the
 stream port entirely. You should get a 64x37 grid of hex digits scrolling diagonally

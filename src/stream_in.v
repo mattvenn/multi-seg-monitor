@@ -24,6 +24,8 @@ module stream_in #(
     input  wire [7:0] data,         // ui_in
     input  wire       strobe,       // asynchronous, from the host
     input  wire       frame_start,  // vsync edge
+    input  wire       enable,       // stream mode selected (uio[7] high)
+    output wire       stb,          // synchronised strobe edge, for the config port
     output reg        req,          // a byte is waiting to be written
     input  wire       grant,
     output wire [9:0] waddr,
@@ -38,6 +40,11 @@ module stream_in #(
         sync <= {sync[1:0], strobe};
 
     wire strobe_rise = sync[1] && !sync[2];
+
+    // Exported so multi_seg_monitor.v's config port, which reads the same
+    // strobe while stream mode is off, reuses this synchroniser rather than
+    // growing a second one on the same asynchronous pin.
+    assign stb = strobe_rise;
 
     reg [7:0] hold;
     reg [5:0] s_row;  // 6 bits: ROWS-1 (36 for this design's 37 rows) doesn't
@@ -68,7 +75,12 @@ module stream_in #(
             // A strobe arriving in the same cycle as a grant is fine and must not
             // drop the byte: wdata still carries the old hold value for this
             // cycle's write, and req stays set for the new one.
-            if (strobe_rise) begin
+            //
+            // Gated on `enable` because with stream mode off the strobe
+            // carries config bytes (multi_seg_monitor.v), and a req left
+            // pending from one would land in the line buffer as a pixel
+            // byte the moment stream mode came back on.
+            if (strobe_rise && enable) begin
                 hold <= data;
                 req  <= 1'b1;
             end
@@ -150,7 +162,7 @@ module stream_in #(
                     assert (wdata == shadow);
                 shadow_valid <= 1'b0;
             end
-            if (strobe_rise) begin
+            if (strobe_rise && enable) begin
                 shadow       <= data;
                 shadow_valid <= 1'b1;
             end

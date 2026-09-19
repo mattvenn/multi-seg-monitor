@@ -1,10 +1,10 @@
 """
 Choose the reset-time Pmod/palette strap, then reset the ASIC so it latches.
 
-src/tt_um_multi_seg_monitor.v samples ui_in[2:0] every cycle rst_n is low and
-freezes it once rst_n rises -- pmod_type (ui_in[0]) picks Digilent PmodVGA
-(0) or Tiny VGA (1), palette_sel (ui_in[2:1]) picks one of src/palette.v's 4
-colour palettes.
+src/config_port.v samples ui_in[3:0] every cycle rst_n is low and freezes
+it once rst_n rises -- pmod_type (ui_in[0]) picks Digilent PmodVGA (0) or
+Tiny VGA (1), ui_in[3:1] picks one of the chip's 8 built-in palette presets
+(tools/palette_builder/presets.json).
 
 seg_player.py and gen_mode.py each inline their own copy of set_strap()'s
 logic rather than importing it from here: `mpremote run <file>` execs a
@@ -14,7 +14,7 @@ hardware). This file exists only as a standalone way to poke the strap on
 its own, e.g. to check it latches without also starting the player.
 
 The physical reset button is NOT a reliable way to select a mode: it leaves
-ui_in[2:0] at whatever it happens to be, not a deliberate choice. Only a
+ui_in[3:0] at whatever it happens to be, not a deliberate choice. Only a
 firmware-driven reset (here, or seg_player.py/gen_mode.py's own copy)
 guarantees the strap value.
 """
@@ -29,7 +29,7 @@ PIXEL_HZ = 40_000_000  # required VGA pixel clock, 800x600@60
 
 def set_strap(tt, pmod_type=0, palette=0):
     """
-    Drive ui_in[2:0] and pulse the project reset so the chip latches the
+    Drive ui_in[3:0] and pulse the project reset so the chip latches the
     strap. `tt` must already have its clock running
     (tt.clock_project_PWM(...)) -- the strap register only samples on
     posedge clk, so the clock has to be running before and through the
@@ -37,8 +37,8 @@ def set_strap(tt, pmod_type=0, palette=0):
     """
     if pmod_type not in (0, 1):
         raise ValueError("pmod_type must be 0 (Digilent PmodVGA) or 1 (Tiny VGA)")
-    if not 0 <= palette <= 3:
-        raise ValueError("palette must be 0-3")
+    if not 0 <= palette <= 7:
+        raise ValueError("palette must be 0-7")
 
     strap = (palette << 1) | pmod_type
     # Keep these pins actively driven, not released back to input, for the
@@ -48,7 +48,7 @@ def set_strap(tt, pmod_type=0, palette=0):
     # returning (MicroPython Pin objects don't need to stay referenced for
     # the GPIO state to hold), which is fine: once rst_n rises the chip never
     # reads them as a strap again, only as ordinary stream data.
-    for i in range(3):
+    for i in range(4):
         Pin(DATA_BASE + i, Pin.OUT, value=(strap >> i) & 1)
 
     tt.reset_project(True)

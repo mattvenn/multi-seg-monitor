@@ -45,25 +45,33 @@ module tb ();
         .rst_n   (rst_n)
     );
 
-    // Standalone palette instance for test_palette.py, separate from the one
-    // inside multi_seg_monitor.v: that instance's sel/idx are wires driven by
-    // real rendering logic, not freely settable from cocotb, so the palette
-    // distinctness/RTL-vs-Python checks need ports a testbench can actually
-    // drive. Parallel to the real design, touches nothing in it.
-    reg  [1:0] dbg_pal_sel;
-    reg  [3:0] dbg_pal_idx;
-    wire [3:0] dbg_pal_r, dbg_pal_g, dbg_pal_b;
+    // Standalone palette and preset-table instances for the palette tests,
+    // separate from the ones inside multi_seg_monitor.v: those are driven by
+    // real rendering logic and stored state, not freely settable from cocotb,
+    // so the RTL-vs-Python checks need ports a testbench can actually drive.
+    // Parallel to the real design, touches nothing in it.
+    reg  [53:0] dbg_pal_params;
+    reg  [3:0]  dbg_pal_idx;
+    wire [3:0]  dbg_pal_r, dbg_pal_g, dbg_pal_b;
+    reg  [2:0]  dbg_preset_sel;
+    wire [53:0] dbg_preset_params;
 
     // RTL-only: the gate-level netlist is flattened to one module, so there is
-    // no `palette` to instantiate under GL_TEST, and test_palette_matches_
-    // python_table skips itself there (it checks the RTL table, not gates).
+    // no `palette` to instantiate under GL_TEST, and the tests that use these
+    // skip themselves there (they check the RTL, not gates).
 `ifndef GL_TEST
     palette dbg_pal (
-        .sel (dbg_pal_sel),
-        .idx (dbg_pal_idx),
-        .r   (dbg_pal_r),
-        .g   (dbg_pal_g),
-        .b   (dbg_pal_b)
+        .clk    (clk),
+        .params (dbg_pal_params),
+        .idx    (dbg_pal_idx),
+        .r      (dbg_pal_r),
+        .g      (dbg_pal_g),
+        .b      (dbg_pal_b)
+    );
+
+    palette_presets dbg_presets (
+        .sel    (dbg_preset_sel),
+        .params (dbg_preset_params)
     );
 `endif
 
@@ -74,7 +82,9 @@ module tb ();
     // chip does (resampled every cycle rst_n is low), rather than reaching
     // into user_project for the strap: the gate-level netlist has no
     // `pmod_type` net to reach, and this way the Tiny VGA gold image runs
-    // under GL_TEST too, still depending only on pins.
+    // under GL_TEST too, still depending only on pins. The cost is that a
+    // config packet which changes pmod_type isn't followed here -- the tests
+    // that send one check the pins directly instead of capturing a frame.
     reg capture_tiny = 1'b0;
     always @(posedge clk)
         if (!rst_n)

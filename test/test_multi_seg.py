@@ -45,12 +45,13 @@ rtl_only = cocotb.test(skip=GATES)
 
 
 async def reset(dut, strap=0):
-    """`strap` is sampled onto ui_in[2:0] for the whole reset pulse and
-    latched as (pmod_type, palette_sel) -- see src/tt_um_multi_seg_monitor.v.
-    Default 0 selects Digilent PmodVGA + palette 0, today's behaviour, so
-    every existing call site is unaffected unless it opts in."""
+    """`strap` is sampled onto ui_in[3:0] for the whole reset pulse and
+    latched as (pmod_type, preset) -- see "Reset strap, config port and
+    palette state" in src/multi_seg_monitor.v. Default 0 selects Digilent
+    PmodVGA + preset 0 (grey), so every call site is unaffected unless it
+    opts in."""
     dut.ena.value = 1
-    dut.ui_in.value = strap & 0x7
+    dut.ui_in.value = strap & 0xF
     dut.uio_in.value = 0
     dut.dump_en.value = 0
     dut.rst_n.value = 0
@@ -373,27 +374,47 @@ async def test_render_frame_palette2(dut):
 
 
 @rtl_only
-async def test_palette_matches_python_table(dut):
-    """src/palette.v must match tools/segments.py's PALETTES entry-for-entry
-    -- the anti-transcription-drift check for the hand-translated RTL case
-    statement. If this holds, palette.v inherits PALETTES' own invariants
-    (verified separately, in Python, by tools/test_palettes.py) for free."""
+async def test_palette_matches_python_model(dut):
+    """src/palette_presets.v must hold exactly the parameters
+    tools/palette_builder/presets.json describes, and src/palette.v must
+    compute exactly what tools/segments.py's curve_value() does -- for every
+    preset and for arbitrary parameter words, since a config packet can load
+    any 54 bits. If this holds, the presets inherit the palette rules that
+    tools/test_palettes.py checks in Python."""
+    import random
+
     cocotb.start_soon(Clock(dut.clk, CLK_PS, unit="ps").start())
     await reset(dut)
 
-    bad = []
-    for sel in range(4):
-        for idx in range(16):
-            dut.dbg_pal_sel.value = sel
-            dut.dbg_pal_idx.value = idx
-            await Timer(1, unit="ns")
-            got = (int(dut.dbg_pal_r.value), int(dut.dbg_pal_g.value), int(dut.dbg_pal_b.value))
-            want = segments.PALETTES[sel][idx]
-            if got != want:
-                bad.append((sel, idx, want, got))
+    for n, params in enumerate(segments.PRESET_PARAMS):
+        dut.dbg_preset_sel.value = n
+        await Timer(1, unit="ns")
+        got = int(dut.dbg_preset_params.value)
+        want = segments.pack_params(params)
+        assert got == want, (
+            f"preset {n}: RTL {segments.unpack_params(got)} != JSON {params} "
+            "-- rerun palette_builder.py --write-rtl?"
+        )
 
-    assert not bad, f"{len(bad)} of 64 palette entries mismatch RTL vs Python, first few: {bad[:5]}"
-    dut._log.info("all 4 palettes match tools/segments.py exactly")
+    rng = random.Random(7)
+    words = [segments.pack_params(p) for p in segments.PRESET_PARAMS]
+    words += [rng.getrandbits(54) for _ in range(40)]
+    bad = []
+    for word in words:
+        want = segments.curve_palette(segments.unpack_params(word))
+        dut.dbg_pal_params.value = word
+        for idx in range(16):
+            dut.dbg_pal_idx.value = idx
+            # palette.v is a 2-stage pipeline; a third edge is margin for
+            # the input change landing just after one.
+            await ClockCycles(dut.clk, 3)
+            got = (int(dut.dbg_pal_r.value), int(dut.dbg_pal_g.value), int(dut.dbg_pal_b.value))
+            if got != tuple(want[idx]):
+                bad.append((hex(word), idx, want[idx], got))
+
+    assert not bad, f"{len(bad)} palette entries mismatch RTL vs Python, first few: {bad[:5]}"
+    dut._log.info("%d presets and %d curves match tools/segments.py exactly",
+                  segments.N_PRESETS, len(words))
 
 
 @rtl_only
@@ -408,16 +429,19 @@ async def test_strap_latches_last_value_before_reset_rises(dut):
     dut.dump_en.value = 0
     dut.rst_n.value = 0
 
-    dut.ui_in.value = 0b111  # Tiny VGA, palette 3 -- would be wrong if it stuck
+    dut.ui_in.value = 0b1111  # Tiny VGA, preset 7 -- would be wrong if it stuck
     await ClockCycles(dut.clk, 5)
-    dut.ui_in.value = 0b010  # Digilent, palette 1 -- this is the one that should stick
+    dut.ui_in.value = 0b1010  # Digilent, preset 5 -- this is the one that should stick
     await ClockCycles(dut.clk, 5)
 
     dut.rst_n.value = 1
     await ClockCycles(dut.clk, 1)
 
     assert int(dut.user_project.pmod_type.value) == 0
-    assert int(dut.user_project.palette_sel.value) == 1
+    assert int(dut.user_project.core.preset_idx.value) == 5
+    assert int(dut.user_project.core.pal_params.value) == segments.pack_params(
+        segments.PRESET_PARAMS[5]
+    ), "strap picked preset 5 but the live palette is something else"
 
 
 @rtl_only
@@ -459,23 +483,157 @@ async def test_tiny_vga_pin_mapping(dut):
 
 @rtl_only
 async def test_strap_does_not_couple_to_stream_data_after_reset(dut):
-    """Once rst_n rises, ui_in[2:0] reverts to ordinary stream-data bits --
-    the latched pmod_type/palette_sel must never move again, no matter what
-    the host subsequently drives on ui_in."""
+    """Once rst_n rises, ui_in[3:0] reverts to ordinary stream-data bits --
+    the latched pmod_type/preset must never move again, no matter what the
+    host subsequently drives on ui_in (short of strobing a config packet)."""
     cocotb.start_soon(Clock(dut.clk, CLK_PS, unit="ps").start())
-    await reset(dut, strap=0b101)  # Tiny VGA, palette 2
+    await reset(dut, strap=0b1101)  # Tiny VGA, preset 6
 
-    want_pmod, want_pal = 1, 2
+    want_pmod, want_pal = 1, 6
     assert int(dut.user_project.pmod_type.value) == want_pmod
-    assert int(dut.user_project.palette_sel.value) == want_pal
+    assert int(dut.user_project.core.preset_idx.value) == want_pal
 
-    for value in range(8):
+    for value in range(16):
         dut.ui_in.value = value
         await ClockCycles(dut.clk, 3)
         assert int(dut.user_project.pmod_type.value) == want_pmod
-        assert int(dut.user_project.palette_sel.value) == want_pal
+        assert int(dut.user_project.core.preset_idx.value) == want_pal
 
     dut._log.info("strap immune to post-reset ui_in changes")
+
+
+# --------------------------------------------------------------------------
+# Config packet
+#
+# With uio[7] low the generator draws the picture and each strobe carries a
+# config byte instead of a pixel byte; every drop of uio[7] starts a new
+# packet. See "Reset strap, config port and palette state" in
+# src/multi_seg_monitor.v and segments.config_packet().
+# --------------------------------------------------------------------------
+
+
+async def send_config(dut, packet):
+    """Strobe `packet` in with stream mode off. Pulses uio[7] high first so
+    the packet starts from byte 0 whatever came before."""
+    dut.uio_in.value = UIO_MODE
+    await ClockCycles(dut.clk, 4)
+    dut.uio_in.value = 0
+    await ClockCycles(dut.clk, 4)
+    for byte in packet:
+        dut.ui_in.value = byte
+        await ClockCycles(dut.clk, 2)
+        dut.uio_in.value = UIO_STB
+        await ClockCycles(dut.clk, 4)
+        dut.uio_in.value = 0
+        await ClockCycles(dut.clk, 4)
+
+
+# Red-only ramp with a knee: every lit pixel must come out with G = B = 0, and
+# every level differs from the grey preset, so a capture proves the packet
+# really replaced the palette rather than one channel of it.
+# A channel parked at knee (15, 0) with zero slopes is dark everywhere.
+CUSTOM_CURVE = (
+    segments.curve_params(4, 2, 15, 15),
+    (15, 0, 0, 0),
+    (15, 0, 0, 0),
+)
+
+
+@rtl_only
+async def test_config_packet_loads_a_palette(dut):
+    """A packet sent in generator mode replaces the palette. The capture is
+    compared pixel for pixel against the grey gold image remapped through
+    the new curve -- the generator's picture is the same, only its colours
+    move -- so this checks the whole path: strobe, packet decode, curve,
+    output register, pins."""
+    cocotb.start_soon(Clock(dut.clk, CLK_PS, unit="ps").start())
+    await reset(dut)
+
+    await send_config(dut, segments.config_packet(CUSTOM_CURVE))
+    assert int(dut.user_project.core.pal_params.value) == segments.pack_params(CUSTOM_CURVE)
+    assert int(dut.user_project.core.cycle_en.value) == 0, "a packet without the cycle bit must stop cycling"
+
+    # Same timing as test_render_frame, so it's the same generator frame.
+    await ClockCycles(dut.clk, 2 * H_TOTAL * V_TOTAL)
+    dut.dump_en.value = 1
+    await ClockCycles(dut.clk, 3 * H_TOTAL * V_TOTAL)
+
+    width, height, px = read_ppm("frame.ppm")
+    gold_w, gold_h, gold = png.read_png(os.path.join(GOLD_DIR, "generator.png"))
+    assert (width, height) == (gold_w, gold_h)
+    lut = segments.curve_palette(CUSTOM_CURVE)
+    want = bytearray()
+    for i in range(0, len(gold), 3):
+        want += bytes(v * 17 for v in lut[gold[i] // 17])
+    bad = sum(1 for i in range(0, len(px), 3) if bytes(px[i : i + 3]) != want[i : i + 3])
+    assert not bad, f"{bad} pixels differ from generator.png remapped through the custom curve"
+
+
+@rtl_only
+async def test_config_packet_needs_the_magic_nibble(dut):
+    """A header without 0xA in its top nibble ignores the whole packet: a
+    stray edge on a floating strobe mustn't be able to flip pmod_type or
+    scribble on the palette. The next packet (after uio[7] pulses) still
+    works, so a bad one doesn't wedge the port."""
+    cocotb.start_soon(Clock(dut.clk, CLK_PS, unit="ps").start())
+    await reset(dut, strap=0b0010)  # Digilent, preset 1
+
+    before = int(dut.user_project.core.pal_params.value)
+    packet = bytearray(segments.config_packet(CUSTOM_CURVE, pmod_type=1))
+    packet[0] = (0x5 << 4) | (packet[0] & 0xF)
+    await send_config(dut, packet)
+    assert int(dut.user_project.core.pal_params.value) == before
+    assert int(dut.user_project.pmod_type.value) == 0
+    assert int(dut.uio_oe.value) == 0b0011_1111
+
+    await send_config(dut, segments.config_packet(CUSTOM_CURVE))
+    assert int(dut.user_project.core.pal_params.value) == segments.pack_params(CUSTOM_CURVE)
+
+
+@rtl_only
+async def test_config_packet_sets_pmod_and_reloads_preset(dut):
+    """pmod_type follows the header, and uio_oe follows pmod_type -- the
+    electrical point of the whole thing. load_preset puts the strapped
+    preset back after a custom curve."""
+    cocotb.start_soon(Clock(dut.clk, CLK_PS, unit="ps").start())
+    await reset(dut, strap=0b0110)  # Digilent, preset 3
+
+    assert int(dut.uio_oe.value) == 0b0011_1111
+    await send_config(dut, segments.config_packet(CUSTOM_CURVE, pmod_type=1))
+    assert int(dut.user_project.pmod_type.value) == 1
+    assert int(dut.uio_oe.value) == 0, "Tiny VGA mode must leave uio all-input"
+
+    await send_config(dut, segments.config_packet(None, pmod_type=0))
+    assert int(dut.uio_oe.value) == 0b0011_1111
+    assert int(dut.user_project.core.pal_params.value) == segments.pack_params(
+        segments.PRESET_PARAMS[3]
+    )
+
+    # Stream mode on: strobes are pixel bytes again and config is untouched.
+    dut.uio_in.value = UIO_MODE
+    dut.ui_in.value = 0xA1
+    await ClockCycles(dut.clk, 2)
+    dut.uio_in.value = UIO_STROBE
+    await ClockCycles(dut.clk, 4)
+    dut.uio_in.value = UIO_MODE
+    await ClockCycles(dut.clk, 4)
+    assert int(dut.user_project.pmod_type.value) == 0
+
+
+@rtl_only
+async def test_generator_cycles_through_presets(dut):
+    """With no host, the generator steps to the next preset every 256
+    frames. frame_ctr is poked to 255 rather than waiting 256 frames out."""
+    cocotb.start_soon(Clock(dut.clk, CLK_PS, unit="ps").start())
+    await reset(dut, strap=0b1110)  # Digilent, preset 7: also checks the wrap to 0
+
+    dut.user_project.core.frame_ctr.value = 0xFF
+    await FallingEdge(dut.vs)
+    await ClockCycles(dut.clk, 4)
+    assert int(dut.user_project.core.preset_idx.value) == 0
+    assert int(dut.user_project.core.pal_params.value) == segments.pack_params(
+        segments.PRESET_PARAMS[0]
+    )
 
 
 # --------------------------------------------------------------------------

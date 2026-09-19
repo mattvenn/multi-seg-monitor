@@ -16,10 +16,10 @@ module multi_seg_monitor (
     input  wire [7:0] stream_data,  // ui_in
     input  wire       stream_stb,   // uio[0], asynchronous
     input  wire       stream_mode,  // uio[1]: 0 = internal generator, 1 = stream
-    input  wire [1:0] palette_sel,  // reset strap, latched in the wrapper -- see palette.v
+    output wire       pmod_type,    // reset strap or config packet, to the wrapper
     output reg        hsync,
     output reg        vsync,
-    output wire [3:0] r,
+    output wire [3:0] r,             // registered inside palette.v
     output wire [3:0] g,
     output wire [3:0] b
     );
@@ -227,6 +227,7 @@ module multi_seg_monitor (
     // Stream port and write arbitration
     // ------------------------------------------------------------------
     wire       str_req;
+    wire       str_stb;
     wire [9:0] str_waddr;
     wire [7:0] str_wdata;
     wire       str_grant = wr_grant && stream_mode && str_req;
@@ -240,10 +241,32 @@ module multi_seg_monitor (
         .data        (stream_data),
         .strobe      (stream_stb),
         .frame_start (frame_start),
+        .enable      (stream_mode),
+        .stb         (str_stb),
         .req         (str_req),
         .grant       (str_grant),
         .waddr       (str_waddr),
         .wdata       (str_wdata)
+    );
+
+    // ------------------------------------------------------------------
+    // Reset strap, config packet and palette state -- see config_port.v.
+    // ------------------------------------------------------------------
+    wire [53:0] pal_params;
+    wire [2:0]  preset_idx;  // only read by the tests, via the hierarchy
+    wire        cycle_en;    // likewise
+
+    config_port cfg (
+        .clk         (clk),
+        .rst_n       (rst_n),
+        .data        (stream_data),
+        .stb         (str_stb),
+        .stream_mode (stream_mode),
+        .frame_wrap  (frame_start && frame_ctr == 8'hFF),
+        .pmod_type   (pmod_type),
+        .pal_params  (pal_params),
+        .preset_idx  (preset_idx),
+        .cycle_en    (cycle_en)
     );
 
     wire       lb_we    = stream_mode ? str_grant : gen_grant;
@@ -316,20 +339,40 @@ module multi_seg_monitor (
     // This module has no notion that two physical Pmods exist; the wrapper
     // (tt_um_multi_seg_monitor.v) decides how many bits of r/g/b actually
     // reach a pin.
-    wire [3:0] pal_idx = visible ? seg_int : 4'h0;
+    //
+    // Three pipeline flops between the segment decode and the pins, all for
+    // timing. Before the palette was a loadable curve its ROM output went
+    // straight to the pins, a path nextpnr never times; the curve's
+    // multiplier made that path matter. On the iCE40 decode plus curve came
+    // to well over the 25 ns cycle, so the index is registered here and the
+    // curve is split in two inside palette.v, which also registers its
+    // output. On the ASIC the same flops take the multiplier off the pad
+    // path and stop the DAC pins glitching while it settles.
+    //
+    // The palette input used to be one cycle behind the raw syncs; these add
+    // three more, so the syncs get four flops to match. Every pin moves by
+    // the same cycles, so the picture doesn't move at all.
+    reg [3:0] pal_idx;
+
+    always @(posedge clk)
+        pal_idx <= visible ? seg_int : 4'h0;
+
     palette pal (
-        .sel (palette_sel),
-        .idx (pal_idx),
-        .r   (r),
-        .g   (g),
-        .b   (b)
+        .clk    (clk),
+        .params (pal_params),
+        .idx    (pal_idx),
+        .r      (r),
+        .g      (g),
+        .b      (b)
     );
 
-    // r/g/b are combinational from the x_px pipeline stage, one cycle behind
-    // the raw sync outputs, so delay the syncs to match.
+    reg [2:0] hsync_p, vsync_p;
+
     always @(posedge clk) begin
-        hsync <= vga_hsync;
-        vsync <= vga_vsync;
+        hsync_p <= {hsync_p[1:0], vga_hsync};
+        vsync_p <= {vsync_p[1:0], vga_vsync};
+        hsync   <= hsync_p[2];
+        vsync   <= vsync_p[2];
     end
 
 `ifdef FORMAL

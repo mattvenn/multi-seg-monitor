@@ -18,6 +18,8 @@ WRAPPER    = $(TT_TOOLS)/fpga/tt_fpga_top.v
 SOURCES  = src/tt_um_multi_seg_monitor.v \
            src/multi_seg_monitor.v \
            src/palette.v \
+           src/palette_presets.v \
+           src/config_port.v \
            src/VgaSyncGen.v \
            src/line_buffer.v \
            src/seg7_rom.v \
@@ -56,6 +58,7 @@ $(BUILD)/$(TOP).bin: $(BUILD)/$(TOP).asc
 test:
 	$(MAKE) -C test
 	cd tools && python3 test_video2seg.py
+	cd tools && python3 test_palettes.py && python3 palette_builder/test_palette_builder.py
 
 # Formal properties (SymbiYosys). Separate from `test`: these check RTL
 # invariants directly rather than simulated behaviour, and one property
