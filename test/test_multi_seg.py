@@ -539,7 +539,30 @@ CUSTOM_CURVE = (
 )
 
 
-@rtl_only
+def check_remapped_gold(px, width, height, gold_name, params):
+    """Compare a capture with a grey gold image pushed through `params`.
+
+    Every gold capture is taken on the grey preset, so each pixel is its
+    stored intensity times 17; remapping that through a curve gives exactly
+    what the chip should draw with the curve loaded instead. Pins only --
+    no internal nets -- so this holds for the gate-level netlist too."""
+    gold_w, gold_h, gold = png.read_png(os.path.join(GOLD_DIR, gold_name))
+    assert (width, height) == (gold_w, gold_h)
+    lut = segments.curve_palette(params)
+    want = bytearray()
+    for i in range(0, len(gold), 3):
+        want += bytes(v * 17 for v in lut[gold[i] // 17])
+    bad = [i // 3 for i in range(0, len(px), 3) if bytes(px[i : i + 3]) != want[i : i + 3]]
+    assert not bad, (
+        f"{len(bad)} pixels differ from {gold_name} remapped through the loaded curve, "
+        f"first at {[(i % width, i // width) for i in bad[:5]]}"
+    )
+
+
+# Not rtl_only: the pass/fail is the pin-level capture, so the gate-level run
+# checks the real netlist's strobe path, decoder, curve and pipeline too. Only
+# the register peeks are RTL-only, because GL has no hierarchy to peek into.
+@cocotb.test()
 async def test_config_packet_loads_a_palette(dut):
     """A packet sent in generator mode replaces the palette. The capture is
     compared pixel for pixel against the grey gold image remapped through
@@ -550,8 +573,9 @@ async def test_config_packet_loads_a_palette(dut):
     await reset(dut)
 
     await send_config(dut, segments.config_packet(CUSTOM_CURVE))
-    assert int(dut.user_project.core.pal_params.value) == segments.pack_params(CUSTOM_CURVE)
-    assert int(dut.user_project.core.cycle_en.value) == 0, "a packet without the cycle bit must stop cycling"
+    if not GATES:
+        assert int(dut.user_project.core.pal_params.value) == segments.pack_params(CUSTOM_CURVE)
+        assert int(dut.user_project.core.cycle_en.value) == 0, "a packet without the cycle bit must stop cycling"
 
     # Same timing as test_render_frame, so it's the same generator frame.
     await ClockCycles(dut.clk, 2 * H_TOTAL * V_TOTAL)
@@ -559,14 +583,38 @@ async def test_config_packet_loads_a_palette(dut):
     await ClockCycles(dut.clk, 3 * H_TOTAL * V_TOTAL)
 
     width, height, px = read_ppm("frame.ppm")
-    gold_w, gold_h, gold = png.read_png(os.path.join(GOLD_DIR, "generator.png"))
-    assert (width, height) == (gold_w, gold_h)
-    lut = segments.curve_palette(CUSTOM_CURVE)
-    want = bytearray()
-    for i in range(0, len(gold), 3):
-        want += bytes(v * 17 for v in lut[gold[i] // 17])
-    bad = sum(1 for i in range(0, len(px), 3) if bytes(px[i : i + 3]) != want[i : i + 3])
-    assert not bad, f"{bad} pixels differ from generator.png remapped through the custom curve"
+    check_remapped_gold(px, width, height, "generator.png", CUSTOM_CURVE)
+
+
+@cocotb.test()
+async def test_custom_palette_survives_streaming(dut):
+    """The firmware's real sequence: load a curve with uio[7] low, then raise
+    it and stream video. Stream mode must leave the loaded palette alone and
+    colour streamed pixels with it -- the capture is compared against
+    stream.png (test_stream_frame's grey capture of the same frame at the
+    same timing) remapped through the curve. Pins only, so it runs at gate
+    level too."""
+    cocotb.start_soon(Clock(dut.clk, CLK_PS, unit="ps").start())
+    await reset(dut)
+
+    await send_config(dut, segments.config_packet(CUSTOM_CURVE))
+    dut.uio_in.value = UIO_IDLE  # stream mode from here on
+
+    cocotb.start_soon(host_stream(dut, make_test_frame(), frames=7))
+
+    # Same timing as test_stream_frame, so it's the same streamed frame.
+    await ClockCycles(dut.clk, 2 * H_TOTAL * V_TOTAL)
+    dut.dump_en.value = 1
+    await ClockCycles(dut.clk, 3 * H_TOTAL * V_TOTAL)
+
+    # Pixels first: they're the check the gate-level run relies on.
+    width, height, px = read_ppm("frame.ppm")
+    check_remapped_gold(px, width, height, "stream.png", CUSTOM_CURVE)
+
+    if not GATES:
+        assert int(dut.user_project.core.pal_params.value) == segments.pack_params(CUSTOM_CURVE), (
+            "streaming changed the loaded palette"
+        )
 
 
 @rtl_only
