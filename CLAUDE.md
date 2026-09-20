@@ -113,11 +113,19 @@ drawn. Everything below follows from that.
 - **Source mux**: internal generator (`uio[7]` low, needs no external data, is the
   silicon bring-up safety net) or the stream port (`stream_in.v`). The write pointer
   resets on vsync, so the link is self-synchronising.
+- **The generator draws a zone plate** (`zoneplate.v`), not the scrolling hex test
+  pattern it started with. Two accumulators carry the motion — `ring_ph` for
+  the ring phase, `t_src` for the source points' time — rather than products
+  of the frame number, and the slow variation moves only their *rates*. That is
+  the rule the attract mode is built on: a speed may change, a position may
+  never jump.
 - **Config port** (`config_port.v`): while `uio[7]` is low the strobes carry a
   config packet instead of pixels — Pmod type, preset cycling, and a palette
-  curve. Byte layout is in that file's header and `README.md`. The header's magic
-  nibble (`0xA`) is what stops a floating strobe on a bare board flipping the
-  Pmod. `formal/config_port.sby` proves the protocol on this module alone.
+  curve — and `ui_in[6:1]` are read as live DIP switches. Byte layout, switch
+  map and the `dip_live` host-takeover latch are in that file's header and
+  `README.md`. The header's magic nibble (`0xA`) is what stops a floating strobe
+  on a bare board flipping the Pmod. `formal/config_port.sby` proves the protocol
+  on this module alone, switches included.
 - **Palette** (`palette.v`) is three per-channel curves, not a table: two lines
   through a knee, slopes in eighths, clipped at 15 — 54 bits of state rather
   than the 192 flops a loadable 16x12 table would cost. It is a 2-stage
@@ -144,7 +152,11 @@ palettes. `src/palette_presets.v` is **generated** from it (`--write-rtl`) —
 never hand-edit it; `tools/test_palettes.py` fails if the two disagree.
 `tools/segments.py`'s `curve_value()` is the bit-exact model of `palette.v`
 (the cocotb suite checks the RTL against it over the presets and random
-parameter words), and `config_packet()` is the host-side encoder. The firmware
+parameter words), and `config_packet()` is the host-side encoder.
+`tools/attract_proto.py` plays the same role for the generator: `zoneplate_at()`
+is the picture, and `chip_state()`/`chip_step()`/`chip_fade()` are the chip's
+per-frame state simulated from reset. The cocotb suite checks the RTL against
+all of them, and `palette_builder`'s `chip` effect previews them. The firmware
 carries its own copy of that encoder because `mpremote run` can't import
 `tools/`; `test_palettes.py` checks the copy against the original for every legal
 curve.
@@ -165,6 +177,12 @@ palettes (applied in both modes). A config packet (see Architecture) can
 override both later; the strap stays because it makes the pins safe from the
 first cycle out of reset — a Tiny VGA board must never see `uio` driven while
 it waits for a packet. Both live in `src/config_port.v`.
+
+`ui_in[0]` is strap-only and never live. `ui_in[6:1]` are *also* read live, but
+only in generator mode: `[3:1]` the manual palette, `[4]` manual/auto, `[5]` and
+`[6]` steady ring speed / steady drift. They are debounced over two frames and
+abandoned the moment a valid config header arrives (`dip_live`), because the
+RP2350 drives these pins to send one. `src/config_port.v` has the map.
 
 **Digilent PmodVGA** (`ui_in[0]=0`, default), video spans `uo_out` *and* `uio`:
 
@@ -217,10 +235,9 @@ observations of a fault, not a specification of one.
 
 CI (`.github/workflows/gds.yaml`) hardens against `ihp-sg13g2`. Current state: GDS
 builds, LVS matches uniquely, no setup or hold violations, gate-level sim passes,
-but **TT precheck fails on 2672 KLayout DRC violations** — all inside the IHP SRAM
-macro's own subcells (`RM_IHPSG13_1P_BITKIT_*`, `_BLDRV`, `_COLCTRL2`), none in this
-design's logic. `src/config.json` skips DRC locally but precheck does not honour
-that.
+and TT precheck passes. `src/config.json` skips KLayout DRC, which is what the
+IHP SRAM macro's own subcells (`RM_IHPSG13_1P_BITKIT_*`, `_BLDRV`, `_COLCTRL2`)
+used to fail on — never this design's logic.
 
 `info.yaml` says `tiles: "2x2"` (419.52 x 313.74 µm), down from 3x2 and 4x2 before
 that. Every TT `Nx2` block is 313.74 µm tall, so shrinking only ever took width away
@@ -229,21 +246,51 @@ is not optional — the macro is 336.46 µm tall upright, which does not fit in
 313.74 µm of die height. At 2x2 the macro is 38% of the die, so placement density and
 routing congestion around it are the things to watch, not the coordinate.
 
-Area budget, from CI run 35371778615 before the curve palette went in: 58%
-utilisation (macro 49.4k µm², standard cells 24.3k placed of 126.7k core), and
-placement adds about x1.4 over synthesised area. The curve palette and config
-port added ~9.9k µm² synthesised (172 -> 271 flops), so expect ~69%. An IHP
-`dfrbpq_1` flop is 49 µm² — flops are the expensive thing here.
+Area budget, measured against the 126.7k µm² core. The last CI number is 48.7k µm²
+of standard cells (run 35467760338, the zone plate without the attract
+variations); with the macro and its 10 µm halo at a fixed 60.7k that is 86.4%.
+The attract variations and DIP switches add 5.3k µm² synthesised (312 -> 357
+flops), so expect ~91%. An IHP `dfrbpq_1` flop is 49 µm² — flops are the
+expensive thing here, and placement adds about x1.15 over synthesised area for
+new logic (x1.4 over the whole design).
+
+**That is over budget** (80% comfortable, 85% with work). The cheapest lever is
+not in the RTL: `FP_MACRO_HORIZONTAL_HALO`/`FP_MACRO_VERTICAL_HALO` are at
+LibreLane's default of 10 µm and nothing in `src/config.json` sets them. The
+halo ring around a 336.46 x 146.88 µm macro is 10.1k µm², 7.9 points of
+utilisation; halving it to 5 gives back 5.1k, about 4 points. The risk is
+congestion, not legality — the free area at 2x2 is already an L of narrow
+bands and the design runs with `GRT_ALLOW_CONGESTION: 1`. Leave `PDN_*_HALO`
+alone; that one keeps power straps off the macro's own M4 pins.
 
 ### FPGA timing
 
 nextpnr's 40 MHz check fails on `main` and always has (36.7 MHz before the
-curve palette, 33.7-35.2 MHz across seeds after it); the board has been run at
-40 MHz with a ~35 MHz report without trouble, so treat that as the bar rather
-than the pass/fail line. The palette is no longer the critical path — the
-generator's `y_px` -> `gen_busy` enable is. Note `make bitstream` stops at
-that nextpnr error before `icepack`, on `main` too (checked locally with seed
-0), so a flashable `.bin` needs nextpnr's `--timing-allow-fail`.
+curve palette, 33.6-35.7 MHz across seeds 0-3 after it); the board has been run
+at 40 MHz with a ~35 MHz report without trouble, so treat that as the bar rather
+than the pass/fail line. The critical path is the generator's `y_px` -> vsync
+comparator -> `frame_start` -> zone-plate FSM enables. The attract variations
+sit at 33.2-34.0 across the same seeds, about 0.9 MHz down.
+
+Getting them there took three flops, and each one is worth knowing about
+because the same trap is waiting for anything else hung off `frame_start` or
+`frame_ctr`:
+
+- `frame_wrap` is registered rather than wired from `frame_start`. Together,
+  the vsync comparator and `config_port`'s preset table plus 54-bit palette
+  load were 26.8 MHz.
+- `frame_start_d` feeds `config_port`'s switch sampling, purely to keep that
+  logic out of `frame_start`'s fanout. Worth ~0.4 MHz.
+- `gen_fade` is registered. As a wire it put `frame_ctr`'s two comparators in
+  front of the fade multiplier on the way to the line buffer: 27.5 MHz.
+
+The fade multiply itself moved from in front of `lo`/`hi` to `data`, costing a
+second multiplier: in front of them it landed at the end of the longest chain
+in the design (DSP square, 21-bit sum, fold) and cost 5 MHz.
+
+Note `make bitstream` stops at that nextpnr error before `icepack`, on `main`
+too (checked locally with seed 0), so a flashable `.bin` needs nextpnr's
+`--timing-allow-fail`.
 
 ## Conventions
 

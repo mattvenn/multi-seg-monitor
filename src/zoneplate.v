@@ -4,10 +4,15 @@
 //
 // Two points wander the screen on triangle-wave Lissajous paths, and every
 // segment's brightness is the sum of its squared distances to them, scaled and
-// folded into a triangle wave, minus time: rings that tighten outward and flow
-// as the frame counter runs. tools/attract_proto.py's zoneplate_frame() is the
-// bit-exact model (its defaults: ring_shift 13, drift 4, phase_speed 4, two
-// sources) and test_multi_seg.py compares a captured frame against it.
+// folded into a triangle wave, minus a phase that runs with time: rings that
+// tighten outward and flow. tools/attract_proto.py's zoneplate_at() is the
+// bit-exact model (its defaults: ring_shift 13, drift 4, two sources) and
+// test_multi_seg.py compares a captured frame against it.
+//
+// Neither the phase nor the path position is a product of the frame number any
+// more: each is an accumulator, so the *speeds* can vary without the picture
+// ever jumping. See "Slow variation" below. `fade` scales every level on its
+// way out, which is how the palette change hides itself in black.
 //
 // Nothing here is stored per pixel: each segment's level is a pure function of
 // its position and the frame number, so the chip still holds no framebuffer.
@@ -25,7 +30,15 @@ module zoneplate (
     input  wire        clk,
     input  wire        rst_n,
     input  wire        frame_start,  // work out this frame's source points
-    input  wire [13:0] frame,        // already advanced for this frame
+    // frame_ctr as it reads *during* the frame_start edge, i.e. before that
+    // edge advances it. Only the top bits are used, and only to shape the two
+    // rate waves below -- the picture itself comes from ring_ph and t_src.
+    /* verilator lint_off UNUSEDSIGNAL */
+    input  wire [13:0] frame,
+    /* verilator lint_on UNUSEDSIGNAL */
+    input  wire        vary_phase,   // let the ring speed wander
+    input  wire        vary_drift,   // let the source speed wander
+    input  wire [3:0]  fade,         // 15 = full brightness, 0 = black
     input  wire        abort,        // the generator restarted: drop the byte
     input  wire        want,         // a byte is wanted at (col, row, byte_idx)
     input  wire        take,         // ...and was written this cycle
@@ -37,21 +50,74 @@ module zoneplate (
     );
 
     // ------------------------------------------------------------------
+    // Slow variation: only speeds change, never positions
+    //
+    // Matt's one rule for the attract mode is that nothing may jump. So the
+    // two things that move -- the ring phase and the source points' time --
+    // are accumulators rather than products of the frame number, and what
+    // varies is the amount added each frame. A rate change then bends the
+    // motion; it cannot displace it, whatever the rate does, including going
+    // through zero and negative.
+    //
+    // Each rate is a triangle wave off the high bits of the frame counter, so
+    // it creeps one step every few hundred frames. attract_proto.chip_rates()
+    // is the model.
+    //
+    // ring_ph, 9 bits: 7 integer (all the fold keeps) + 2 fraction, so the
+    // rate is in quarter fold-steps. 4 is the old fixed speed of one step per
+    // frame; varying runs -3..12 -- slightly backwards, through stopped, to
+    // 3x -- changing every 256 frames, a 2.3 minute round trip.
+    //
+    // t_src, 17 bits: 14 integer (what the source paths take, in place of the
+    // frame number) + 3 fraction, so the rate is in eighths. 8 is the old
+    // speed; varying runs 4..11, 0.5x to 1.4x, changing every 1024 frames
+    // over 4.5 minutes. Held to positive rates: reversing the drift as well
+    // as the rings made the picture look like it was being scrubbed.
+    // ------------------------------------------------------------------
+    reg  [8:0]  ring_ph;
+    reg  [16:0] t_src;
+
+    // tri(frame[12:8], 5) and tri(frame[13:10], 4): the top bit of each field
+    // is the fold, so the wave is an XOR, not an adder (attract_proto.tri()).
+    wire [3:0]  tri_ph  = frame[12] ? ~frame[11:8]  : frame[11:8];
+    wire [2:0]  tri_t   = frame[13] ? ~frame[12:10] : frame[12:10];
+    // -3 arrives as a 9-bit two's complement addend, which wraps ring_ph the
+    // right way round without a subtracter or a sign bit anywhere else.
+    wire [8:0]  rate_ph = vary_phase ? {5'b0, tri_ph} - 9'd3 : 9'd4;
+    wire [16:0] rate_t  = vary_drift ? {13'b0, tri_t} + 17'd4 : 17'd8;
+
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            ring_ph <= 9'd0;
+            t_src   <= 17'd0;
+        end else if (frame_start) begin
+            // `frame` still reads the pre-advance count on this edge, which is
+            // what attract_proto.chip_step() is given.
+            ring_ph <= ring_ph + rate_ph;
+            t_src   <= t_src + rate_t;
+        end
+    end
+
+    // ------------------------------------------------------------------
     // Source points, once per frame
     //
-    // attract_proto._sources() at drift 4: phases are frame * {24,16,16,20} / 16
+    // attract_proto._sources() at drift 4: phases are t * {24,16,16,20} / 16
     // (the last two offset by 600 and 1400 so the two points don't move in
     // step), folded into a 0..2047 triangle, then scaled to the grid:
     // * 768 >> 11 is * 3 >> 3, and * 592 >> 11 is * 37 >> 7. Only bits
     // [15:4] of each product matter -- the triangle wraps at 4096 -- so the
     // products are 16 bits, as shift-and-adds rather than multipliers.
+    //
+    // t is t_src's integer part. With rate_t held at 8 it counts frames, which
+    // is exactly what this computed before the accumulator went in.
     // ------------------------------------------------------------------
     reg  [9:0]  pt [0:3];   // ax, ay, bx, by
     reg  [2:0]  pi;         // point being worked out; 4 = done
 
-    wire [15:0] f24 = {frame[12:0], 3'b0} + {frame[11:0], 4'b0};
-    wire [15:0] f16 = {frame[11:0], 4'b0};
-    wire [15:0] f20 = {frame[13:0], 2'b0} + {frame[11:0], 4'b0};
+    wire [13:0] t = t_src[16:3];
+    wire [15:0] f24 = {t[12:0], 3'b0} + {t[11:0], 4'b0};
+    wire [15:0] f16 = {t[11:0], 4'b0};
+    wire [15:0] f20 = {t[13:0], 2'b0} + {t[11:0], 4'b0};
     // verilator lint_off UNUSEDSIGNAL
     wire [15:0] prod = (pi[1:0] == 2'd0) ? f24 : (pi[1:0] == 2'd3) ? f20 : f16;
     wire [11:0] ph   = prod[15:4] + (pi[1:0] == 2'd1 ? 12'd600 :
@@ -95,7 +161,7 @@ module zoneplate (
     //   st 3: acc = mag^2,  mag = |dif|,  dif = x - bx
     //   st 4: pa  = (acc + mag^2) >> 11,  mag = |dif|,  dif = y - by
     //   st 5: acc = mag^2,  mag = |dif|
-    //   st 6: level = fold(pa + (acc + mag^2) >> 11 - frame)
+    //   st 6: level = fold(pa + (acc + mag^2) >> 11 - ring_ph)
     //
     // Three registers deep -- difference, magnitude, square -- because on the
     // iCE40 the segment position (col * 12 + offset), the subtraction and the
@@ -122,11 +188,26 @@ module zoneplate (
     wire [9:0]  amag  = dif[10] ? ndif[9:0] : dif[9:0];
     wire [19:0] sq    = mag * mag;
     wire [20:0] sum   = {1'b0, acc} + {1'b0, sq};
-    wire [6:0]  v     = pa + sum[17:11] - frame[6:0];
+    wire [6:0]  v     = pa + sum[17:11] - ring_ph[8:2];
     // verilator lint_on UNUSEDSIGNAL
     wire [3:0]  level = v[6] ? ~v[5:2] : v[5:2];  // attract_proto.tri(v, 7) >> 2
 
-    assign data = {hi, lo};
+    // attract_proto.apply_fade(): exact at both ends -- fade 15 leaves every
+    // level alone, fade 0 is black -- for one 4x5 multiply per level.
+    //
+    // It scales the byte on its way *out* rather than the level on its way
+    // in, which costs a second multiplier and is worth it. In front of lo/hi
+    // it lands at the end of the longest chain in the design -- the DSP's
+    // square, the 21-bit sum, the fold -- and cost 5 MHz on the iCE40
+    // (28.3 against 33.6 on main). Here it starts from a flop and ends at
+    // the line buffer's write port, which is nearly empty.
+    // verilator lint_off UNUSEDSIGNAL
+    wire [4:0]  gain    = {1'b0, fade} + 5'd1;   // 1..16
+    wire [8:0]  fade_lo = {5'b0, lo} * {4'b0, gain};
+    wire [8:0]  fade_hi = {5'b0, hi} * {4'b0, gain};
+    // verilator lint_on UNUSEDSIGNAL
+
+    assign data = {fade_hi[7:4], fade_lo[7:4]};
 
     // dif and mag load every cycle, with no enable: the sample states run one
     // a cycle without stalling, so free-running they hold exactly what the

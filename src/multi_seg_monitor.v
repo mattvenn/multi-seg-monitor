@@ -215,14 +215,72 @@ module multi_seg_monitor (
     reg [7:0]  gen_ptr;
     reg [1:0]  gen_buf;
     reg        gen_busy;
-    // 14 bits: the zone plate's source paths wrap at 2^16 of frame * {24,
-    // 16, 20}, so the whole picture repeats every 2^14 frames (4.5 minutes)
-    // and a wider counter would change nothing. config_port's preset cycling
-    // still steps on the low byte wrapping.
+    // 14 bits: the zone plate's source paths wrap at 2^16 of t * {24, 16,
+    // 20}, so the whole picture repeats every 2^14 frames (4.5 minutes) and a
+    // wider counter would change nothing. The low 9 bits drive the palette
+    // cycle and its fade, and the top bits shape the zone plate's two rate
+    // waves (see src/zoneplate.v).
     reg [13:0] frame_ctr;
     reg        vsync_d;
 
     wire frame_start = vsync_d && !vga_vsync;
+
+    // From config_port: the live DIP switches, and whether the palette is
+    // changing on its own (see below).
+    wire        auto_pal;
+    wire        vary_phase, vary_drift;
+
+    // Fade through black around the automatic palette change, so a change is
+    // a dip rather than a cut. Purely combinational off the frame counter --
+    // 32 frames down, 32 up, either side of the wrap, full brightness for the
+    // 448 in between -- so it costs no state of its own. It is applied to the
+    // generator's picture only, and only while the palette is changing
+    // itself: a host that has taken the palette over never sees a dip.
+    wire [8:0] fade_k   = frame_ctr[8:0];
+    wire [3:0] fade_lvl = fade_k < 9'd32   ? fade_k[4:1] :
+                          fade_k >= 9'd480 ? 4'd15 - fade_k[4:1] : 4'd15;
+
+    // Registered, not wired straight into the zone plate. The level changes
+    // once a frame, but as a wire it put frame_ctr's two comparators in
+    // front of the fade multiplier on the way to the line buffer's write
+    // port, and that was the critical path (27.5 MHz on the iCE40 against
+    // 33.6 on main). Four flops buy it back.
+    //
+    // It follows frame_ctr a cycle late, which no byte can see: the first
+    // one of a frame is written at least sixteen cycles after frame_start,
+    // while the zone plate works out the frame's source points.
+    reg [3:0] gen_fade;
+    always @(posedge clk) begin
+        if (!rst_n)
+            gen_fade <= 4'd15;
+        else
+            gen_fade <= auto_pal ? fade_lvl : 4'd15;
+    end
+
+    // The palette change is registered a cycle off frame_start rather than
+    // taken from it directly. frame_start is the far end of the longest
+    // combinational path on the chip -- y_px through VgaSyncGen's vsync
+    // comparator, a 10-bit carry chain -- and config_port answers it with
+    // the preset table and a 54-bit palette load, which put the two together
+    // at 26.8 MHz on the iCE40 against 33.6 on main. One flop splits them,
+    // and the palette arriving a cycle into vertical blanking is 512 frames
+    // early for anything that could see it.
+    reg frame_wrap;
+    reg frame_start_d;
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            frame_wrap    <= 1'b0;
+            frame_start_d <= 1'b0;
+        end else begin
+            // frame_ctr advances on frame_start, so it still reads the old
+            // count here: this is the last frame of the 512, not the first.
+            frame_wrap    <= frame_start && frame_ctr[8:0] == 9'h1FF;
+            // Likewise the switch sampling. It is a debounce over whole
+            // frames, so a cycle either way means nothing to it, and keeping
+            // it off frame_start keeps that net's fanout down.
+            frame_start_d <= frame_start;
+        end
+    end
     wire row_start   = cell_y && cy == 0 && x_px == 0 && row < ROWS - 1;
     wire zp_ready;
     wire gen_grant   = wr_grant && !stream_mode && gen_busy && zp_ready;
@@ -233,7 +291,13 @@ module multi_seg_monitor (
             gen_ptr   <= 0;
             gen_buf   <= 2'd0;
             gen_busy  <= 0;
-            frame_ctr <= 0;
+            // 32, not 0: gen_fade below holds the first 32 frames of every
+            // 512 at a fade-in, and power-up must not land in one. The
+            // bring-up picture would come up dim, and the gold and
+            // gate-level captures -- taken a handful of frames after reset,
+            // and checking the lit fraction and that all 16 DAC codes appear
+            // -- would be measuring a fade rather than the picture.
+            frame_ctr <= 14'd32;
             vsync_d   <= 1'b1;
         end else begin
             vsync_d <= vga_vsync;
@@ -270,6 +334,9 @@ module multi_seg_monitor (
         .rst_n       (rst_n),
         .frame_start (frame_start),
         .frame       (frame_ctr),
+        .vary_phase  (vary_phase),
+        .vary_drift  (vary_drift),
+        .fade        (gen_fade),
         .abort       (row_start),
         .want        (gen_busy && !stream_mode),
         .take        (gen_grant),
@@ -314,18 +381,21 @@ module multi_seg_monitor (
     wire [2:0]  preset_idx;  // only read by the tests, via the hierarchy
     wire        cycle_en;    // likewise
     // verilator lint_on UNUSEDSIGNAL
-
     config_port cfg (
         .clk         (clk),
         .rst_n       (rst_n),
         .data        (stream_data),
         .stb         (str_stb),
         .stream_mode (stream_mode),
-        .frame_wrap  (frame_start && frame_ctr[7:0] == 8'hFF),
+        .frame_start (frame_start_d),
+        .frame_wrap  (frame_wrap),
         .pmod_type   (pmod_type),
         .pal_params  (pal_params),
         .preset_idx  (preset_idx),
-        .cycle_en    (cycle_en)
+        .cycle_en    (cycle_en),
+        .auto_pal    (auto_pal),
+        .vary_phase  (vary_phase),
+        .vary_drift  (vary_drift)
     );
 
     wire       lb_we    = stream_mode ? str_grant : gen_grant;

@@ -29,8 +29,9 @@ reasoning behind it, and [resolution_discussion.md](resolution_discussion.md) se
   this imitates is single colour anyway. A reset-time strap picks the physical
   Pmod and one of 8 built-in palettes; a config packet sent before streaming can
   override the Pmod and load any curve. With no host the generator cycles
-  through the 8 presets. See "Reset-time config strap" and "Config packet"
-  below, and `tools/palette_builder` to design palettes.
+  through the 8 presets, and `ui_in`'s spare bits are live DIP switches that
+  hold one instead. See "Reset-time config strap", "DIP switches" and "Config
+  packet" below, and `tools/palette_builder` to design palettes.
 
 # Status
 
@@ -141,6 +142,35 @@ only uses `uo_out` (2 bits/channel); `uio[0:5]` go unused and `uio_oe` goes
 all-input in that mode, `uio[6:7]` (strobe/mode select) stay exactly where
 they are in both modes. See `src/config_port.v` and `src/palette.v`.
 
+### DIP switches
+
+`ui_in[0]` is the Pmod strap and is read at reset only, never live — a Tiny
+VGA board must not see `uio` driven while it waits. The rest of `ui_in` is
+read live, but only in generator mode, where nothing else is using those pins.
+All off is the default attract mode:
+
+| Bit | Off (default) | On |
+|---|---|---|
+| `ui_in[3:1]` | the starting palette (reset strap) | the palette held in manual mode |
+| `ui_in[4]` | palette changes every 512 frames (~8.5 s), fading through black | hold the palette `ui_in[3:1]` names |
+| `ui_in[5]` | the rings' flow speed wanders | steady flow |
+| `ui_in[6]` | the sources' drift speed wanders | steady drift |
+| `ui_in[7]` | spare | spare |
+
+Two things keep a host out of this. A switch setting is only applied once two
+consecutive frames have sampled the same value, so a config byte sitting on
+the bus across one frame boundary can't be read as a switch position. And the
+first valid config header turns the switches off for good — the RP2350 drives
+these pins to send a packet, and whatever it leaves there afterwards is not a
+switch. The setting last applied stays in force. Streaming ignores them
+outright, because `ui_in` is pixel data then.
+
+The variation is deliberately slow and never jumps. Only the two speeds move;
+the ring phase and the source positions are accumulators, so a speed change
+bends the motion rather than displacing it. The ring speed steps every 256
+frames over a 2.3-minute round trip (slightly reversed, through stopped, to
+3x) and the drift speed every 1024 frames over 4.5 minutes (0.5x to 1.4x).
+
 ### Config packet
 
 With `uio[7]` low the internal generator draws the picture, and each strobe on
@@ -156,14 +186,23 @@ starts a new packet:
 
 A header alone is enough to change the Pmod or turn preset cycling on or off;
 `load_preset` puts the strapped preset back. The generator steps to the next
-preset every 256 frames (~4 s) until a packet turns cycling off. `firmware/`'s
+preset every 512 frames (~8.5 s), fading through black across the change, until
+a packet or the manual switch turns cycling off. A valid header also hands the
+`ui_in` switches to the host for good, as above. `firmware/`'s
 `main(curve=...)` sends one for you; `tools/segments.py`'s `config_packet()`
 builds one from Python, and `tools/palette_builder` exports the exact bytes.
 
 **1. Internal generator, no firmware.** Leave `uio[7]` low and the design ignores the
-stream port entirely. You should get a 64x37 grid of hex digits scrolling diagonally
-with brightness bands across it. Compare against `test/gold/generator.png`, which is
-the same thing from simulation.
+stream port entirely. You should get a zone plate drawn across the 64x37 grid:
+concentric rings that tighten outward and flow slowly, with the palette changing
+every ~8.5 s through a fade to black. Compare against `test/gold/generator.png`,
+which is the same thing from simulation, a few frames after reset.
+
+The chip has no pull on `uio[7]`, so what the demoboard does with that pin at
+power-up decides whether you get this or a blank screen waiting for a stream.
+That has not been checked on hardware yet; if nothing appears, tie it low
+before suspecting anything else. Then work through the switches above: each
+one should change what you see within two frames.
 
 If this fails, in rough order of likelihood:
 
@@ -264,7 +303,7 @@ both take the choice as arguments to `main()`:
 | `pmod_type` | 0 = Digilent PmodVGA, 1 = Tiny VGA Pmod |
 | `palette` | 0 grey, 1 blue, 2 green, 3 purple, 4 amber, 5 red, 6 cyan, 7 fire |
 | `curve` | optional custom palette, overriding `palette`: three `(x1, y1, x2, y2)` point pairs for R, G, B, as `tools/palette_builder`'s Export prints |
-| `cycle` | `gen_mode.py` only: `True` (the default) steps through all 8 presets every ~4 s |
+| `cycle` | `gen_mode.py` only: `True` (the default) steps through all 8 presets every ~8.5 s |
 
 `mpremote run firmware/seg_player.py` calls `main()` with its defaults, so to choose,
 copy the file across once and call it yourself:

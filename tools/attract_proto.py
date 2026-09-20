@@ -14,7 +14,7 @@ comes once an effect is chosen and this becomes its reference model.
     ./attract_proto.py plasma --param folds=3 --param speed=64 --mp4
     ./attract_proto.py all
 
-plasma, zoneplate and interference take tuning parameters (PARAMS below);
+plasma, zoneplate, chip and interference take tuning parameters (PARAMS below);
 tools/palette_builder/palette_builder.py shows them live, with a slider each,
 and prints the --param string for the setting on screen.
 
@@ -260,17 +260,123 @@ ZONEPLATE_PARAMS = [
 ]
 
 
-def zoneplate_frame(frame, ring_shift=13, drift=4, phase_speed=4, sources=2):
-    ax, ay, bx, by = _sources(frame, drift)
+def zoneplate_at(t, phase, fade=15, ring_shift=13, drift=4, sources=2):
+    """The zone plate as the chip actually computes it: the source paths at
+    time `t` and the rings at `phase`, neither of them a product of the frame
+    number. src/zoneplate.v drives these from its two accumulators (t_src and
+    ring_ph), which is what lets the speeds vary without the picture jumping.
+    `fade` 0..15 scales every level on the way out, for the fade through
+    black at a palette change."""
+    ax, ay, bx, by = _sources(t, drift)
     sh = ring_shift - 2
 
     def fine(x, y):
         p = ((x - ax) ** 2 + (y - ay) ** 2) >> sh
         if sources == 2:
             p = p + (((x - bx) ** 2 + (y - by) ** 2) >> sh)
-        return tri(p - ((frame * phase_speed) >> 2), 7)
+        return tri(p - phase, 7)
 
-    return _levels(fine)
+    f = _levels(fine)
+    if fade == 15:
+        return f
+
+    def faded(x, y):
+        return apply_fade(f(x, y), fade)
+
+    faded.fine = fine
+    return faded
+
+
+def zoneplate_frame(frame, ring_shift=13, drift=4, phase_speed=4, sources=2):
+    """The tunable effect, for exploring parameters: both speeds constant, so
+    time and phase are still simple multiples of the frame number."""
+    return zoneplate_at(frame, (frame * phase_speed) >> 2,
+                        ring_shift=ring_shift, drift=drift, sources=sources)
+
+
+# ---------------------------------------------------------------------------
+# 2a. The chip
+#
+# What src/zoneplate.v and src/multi_seg_monitor.v actually do, bit for bit,
+# rather than what the tunable effect above explores: the zone plate at fixed
+# parameters, driven by two accumulators whose *rates* wander, and dimmed
+# around the automatic palette change. The cocotb suite checks the RTL against
+# this, and palette_builder previews it as the `chip` effect.
+#
+# The rule the whole design follows is that nothing may jump. Only rates vary;
+# ring_ph and t_src themselves are continuous, so a rate change bends the
+# motion rather than displacing it.
+# ---------------------------------------------------------------------------
+RING_MASK = (1 << 9) - 1     # src/zoneplate.v ring_ph: 7 integer + 2 fraction
+T_SRC_MASK = (1 << 17) - 1   # t_src: 14 integer + 3 fraction
+FRAME_MASK = (1 << 14) - 1   # multi_seg_monitor.v frame_ctr
+CHIP_RESET_FRAME = 32        # ...and its reset value, clear of the fade-in
+
+
+def chip_rates(frame_ctr, vary_phase=1, vary_drift=1):
+    """(rate_ph, rate_t) for the frame starting at `frame_ctr`, which is the
+    counter as it reads *before* that frame_start advances it -- the RTL
+    computes both from the same pre-advance value.
+
+    rate_ph is in quarter fold-steps (4 = one step a frame, the old fixed
+    speed) and runs -3..12 when varying, one step every 256 frames. rate_t is
+    in eighths (8 = the old speed) and runs 4..11, one step every 1024."""
+    rate_ph = tri(frame_ctr >> 8, 5) - 3 if vary_phase else 4
+    rate_t = 4 + tri(frame_ctr >> 10, 4) if vary_drift else 8
+    return rate_ph, rate_t
+
+
+def chip_step(state, frame_ctr, vary_phase=1, vary_drift=1):
+    """(ring_ph, t_src) one frame_start on, from `state` at `frame_ctr`."""
+    ring_ph, t_src = state
+    rate_ph, rate_t = chip_rates(frame_ctr, vary_phase, vary_drift)
+    return ((ring_ph + rate_ph) & RING_MASK, (t_src + rate_t) & T_SRC_MASK)
+
+
+def chip_fade(frame_ctr, auto=1):
+    """The fade level 0..15 for the frame showing `frame_ctr`. The automatic
+    palette change happens as frame_ctr[8:0] wraps, with 32 frames of fade
+    either side of it, so the change itself lands in black. `auto` off -- a
+    host holding the palette, or manual mode -- means no fade at all."""
+    if not auto:
+        return 15
+    k = frame_ctr & 0x1FF
+    if k < 32:
+        return k >> 1
+    if k >= 480:
+        return (511 - k) >> 1
+    return 15
+
+
+_CHIP_CACHE = {}
+
+
+def chip_state(frames, vary_phase=1, vary_drift=1):
+    """(frame_ctr, ring_ph, t_src) `frames` frames after reset, with the
+    switches held the whole time. Simulated a frame at a time, because that
+    is the only way to know where two wandering rates have got to; cached, so
+    playing an effect forward costs one step a frame."""
+    key = (vary_phase, vary_drift)
+    trace = _CHIP_CACHE.setdefault(key, [(CHIP_RESET_FRAME, 0, 0)])
+    while len(trace) <= frames:
+        frame_ctr, ring_ph, t_src = trace[-1]
+        ring_ph, t_src = chip_step((ring_ph, t_src), frame_ctr,
+                                   vary_phase, vary_drift)
+        trace.append(((frame_ctr + 1) & FRAME_MASK, ring_ph, t_src))
+    return trace[frames]
+
+
+def chip_frame(frame, vary_phase=1, vary_drift=1, auto=1):
+    """The picture the chip draws `frame` frames after reset."""
+    frame_ctr, ring_ph, t_src = chip_state(frame, vary_phase, vary_drift)
+    return zoneplate_at(t_src >> 3, ring_ph >> 2, chip_fade(frame_ctr, auto))
+
+
+CHIP_PARAMS = [
+    ("vary_phase", 0, 1, 1, "let the ring speed wander (ui_in[5] off)"),
+    ("vary_drift", 0, 1, 1, "let the source speed wander (ui_in[6] off)"),
+    ("auto", 0, 1, 1, "fade through black every 512 frames (ui_in[4] off)"),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -481,6 +587,7 @@ SEG7 = [0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07]  # 7-segment codes for 0
 EFFECTS = {
     "ripples": ripples_frame,
     "zoneplate": zoneplate_frame,
+    "chip": chip_frame,
     "interference": interference_frame,
     "plasma": plasma_frame,
     "ca": None,  # per-digit, handled specially
@@ -490,6 +597,7 @@ EFFECTS = {
 PARAMS = {
     "plasma": PLASMA_PARAMS,
     "zoneplate": ZONEPLATE_PARAMS,
+    "chip": CHIP_PARAMS,
     "interference": INTERFERENCE_PARAMS,
 }
 

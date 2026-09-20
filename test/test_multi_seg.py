@@ -219,23 +219,12 @@ async def test_render_frame(dut):
     check_gold(dut, "generator.png", width, height, px)
 
 
-@rtl_only
-async def test_generator_matches_zoneplate_model(dut):
-    """The generator's zone plate is the one tools/attract_proto.py draws, at
-    its defaults, segment for segment. The gold image only says the picture
-    hasn't changed; this says it's the model's picture, at the frame number
-    the chip was on -- which is what makes attract_proto the reference for
-    tuning it. frame_ctr has advanced once more by the time the capture
-    closes, so the captured frame is the one before."""
+def check_against_model(px, width, model, label):
+    """Every segment of a captured frame against an attract_proto sample
+    function. Segment 7 is the decimal point, which the generator leaves
+    dark."""
     import attract_proto
 
-    cocotb.start_soon(Clock(dut.clk, CLK_PS, unit="ps").start())
-    await reset(dut)
-    await capture_frame(dut)
-    frame = int(dut.user_project.core.frame_ctr.value) - 1
-
-    width, _, px = read_ppm("frame.ppm")
-    model = attract_proto.zoneplate_frame(frame, **attract_proto.default_params("zoneplate"))
     bad = []
     for row in range(ROWS):
         for col in range(COLS):
@@ -247,9 +236,100 @@ async def test_generator_matches_zoneplate_model(dut):
                 if got != want:
                     bad.append((col, row, seg, got, want))
     assert not bad, (
-        f"{len(bad)} segments differ from attract_proto zoneplate frame {frame}; "
+        f"{len(bad)} segments differ from {label}; "
         f"first (col, row, seg, got, want): {bad[:5]}"
     )
+
+
+async def next_frame_start(dut):
+    """Skip to just after the next frame_start, without simulating a whole
+    frame. y_px is VgaSyncGen's only vertical state, so dropping it at the
+    last active line puts vsync about two scanlines away instead of a frame.
+    Only safe for tests that read per-frame state rather than the picture."""
+    dut.user_project.core.sync_gen.y_px.value = 599
+    await FallingEdge(dut.vs)  # the pin lags frame_start by three cycles
+    await ClockCycles(dut.clk, 4)
+
+
+@rtl_only
+async def test_generator_matches_zoneplate_model(dut):
+    """The generator's zone plate is the one tools/attract_proto.py draws,
+    segment for segment, simulated from reset to the captured frame. The gold
+    image only says the picture hasn't changed; this says it is the model's
+    picture, at the frame the chip was on -- which is what makes attract_proto
+    the reference for tuning it.
+
+    Both motion registers are checked too. The picture alone could hide a
+    small phase error inside one fold step, and they are exactly what a wrong
+    rate would move. They have advanced one more frame than the picture has,
+    because frame_ctr has: the capture closes on the vsync that starts the
+    next frame."""
+    import attract_proto
+
+    cocotb.start_soon(Clock(dut.clk, CLK_PS, unit="ps").start())
+    await reset(dut)
+    await capture_frame(dut)
+    now = int(dut.user_project.core.frame_ctr.value)
+
+    _, ring_ph, t_src = attract_proto.chip_state(now - attract_proto.CHIP_RESET_FRAME)
+    got = (int(dut.user_project.core.zp.ring_ph.value),
+           int(dut.user_project.core.zp.t_src.value))
+    assert got == (ring_ph, t_src), (
+        f"at frame {now} the chip's (ring_ph, t_src) is {got}, "
+        f"attract_proto.chip_state says {(ring_ph, t_src)}"
+    )
+
+    shown = now - 1
+    _, ring_ph, t_src = attract_proto.chip_state(shown - attract_proto.CHIP_RESET_FRAME)
+    width, _, px = read_ppm("frame.ppm")
+    check_against_model(
+        px, width,
+        attract_proto.zoneplate_at(t_src >> 3, ring_ph >> 2,
+                                   attract_proto.chip_fade(shown)),
+        f"attract_proto's chip at frame {shown}",
+    )
+
+
+@rtl_only
+async def test_motion_registers_step_like_the_model(dut):
+    """One frame_start moves ring_ph and t_src by exactly what
+    attract_proto.chip_step() says, for all four switch settings and at frame
+    counts either side of a rate step. The rate waves are the only thing the
+    variation switches change, so a wrong bit slice or a lost sign shows up
+    here and nowhere else -- a single frame of the picture looks fine
+    whatever the rates are.
+
+    dip_live is dropped first so the applied switches can be poked directly:
+    that is the state the chip is in once a host has sent a packet, and it
+    stops the all-zero ui_in in this test overwriting them every frame. The
+    pins' own path is tested by test_dip_switches_pick_the_palette."""
+    import attract_proto
+
+    cocotb.start_soon(Clock(dut.clk, CLK_PS, unit="ps").start())
+    await reset(dut)
+    core = dut.user_project.core
+    core.cfg.dip_live.value = 0
+
+    # 0x0FF/0x100 straddle a ring-rate step, 0x3FF/0x400 a drift-rate step,
+    # and 0x1FFF is the last frame before the whole picture repeats.
+    cases = [(0x0020, 0, 0), (0x00FF, 1, 1), (0x0100, 1, 1),
+             (0x03FF, 0, 1), (0x0400, 1, 0), (0x1FFF, 0, 0)]
+    for frame_ctr, vary_phase, vary_drift in cases:
+        # dip_a is ui_in[6:1], so bit 4 is ui_in[5] and bit 5 is ui_in[6];
+        # both are "steady", the inverse of "vary".
+        core.cfg.dip_a.value = ((not vary_drift) << 5) | ((not vary_phase) << 4)
+        core.frame_ctr.value = frame_ctr
+        await ClockCycles(dut.clk, 2)
+        before = (int(core.zp.ring_ph.value), int(core.zp.t_src.value))
+        await next_frame_start(dut)
+        after = (int(core.zp.ring_ph.value), int(core.zp.t_src.value))
+        want = attract_proto.chip_step(before, frame_ctr, vary_phase, vary_drift)
+        assert after == want, (
+            f"frame_ctr {frame_ctr:#06x}, vary_phase={vary_phase} "
+            f"vary_drift={vary_drift}: {before} -> {after}, model says {want}"
+        )
+    dut._log.info("motion registers step like attract_proto.chip_step, "
+                  "over %d frames and all four switch settings", len(cases))
 
 
 # --------------------------------------------------------------------------
@@ -529,7 +609,9 @@ async def test_tiny_vga_pin_mapping(dut):
 async def test_strap_does_not_couple_to_stream_data_after_reset(dut):
     """Once rst_n rises, ui_in[3:0] reverts to ordinary stream-data bits --
     the latched pmod_type/preset must never move again, no matter what the
-    host subsequently drives on ui_in (short of strobing a config packet)."""
+    host subsequently drives on ui_in. ui_in[3:1] do get read again as the
+    manual-palette switches, but only with ui_in[4] set, which nothing here
+    drives -- see test_dip_switches_pick_the_palette."""
     cocotb.start_soon(Clock(dut.clk, CLK_PS, unit="ps").start())
     await reset(dut, strap=0b1101)  # Tiny VGA, preset 6
 
@@ -710,18 +792,137 @@ async def test_config_packet_sets_pmod_and_reloads_preset(dut):
 
 @rtl_only
 async def test_generator_cycles_through_presets(dut):
-    """With no host, the generator steps to the next preset every 256
-    frames. frame_ctr is poked to 255 rather than waiting 256 frames out."""
+    """With no host, the generator steps to the next preset every 512
+    frames. frame_ctr is poked to 511 rather than waiting 512 frames out."""
     cocotb.start_soon(Clock(dut.clk, CLK_PS, unit="ps").start())
     await reset(dut, strap=0b1110)  # Digilent, preset 7: also checks the wrap to 0
 
-    dut.user_project.core.frame_ctr.value = 0xFF
+    dut.user_project.core.frame_ctr.value = 0x1FF
     await FallingEdge(dut.vs)
     await ClockCycles(dut.clk, 4)
     assert int(dut.user_project.core.preset_idx.value) == 0
     assert int(dut.user_project.core.pal_params.value) == segments.pack_params(
         segments.PRESET_PARAMS[0]
     )
+
+
+# --------------------------------------------------------------------------
+# DIP switches
+#
+# In generator mode ui_in carries nothing, so ui_in[6:1] are read live as
+# switches -- see "3. The DIP switches" in src/config_port.v for the map and
+# for why they are debounced over two frames and abandoned once a host sends
+# a packet.
+# --------------------------------------------------------------------------
+DIP_MANUAL = 1 << 4
+
+
+def dip(palette=0, manual=False, steady_phase=False, steady_drift=False):
+    """A ui_in value for the switches: ui_in[3:1] palette, [4] manual,
+    [5] steady phase, [6] steady drift."""
+    return ((palette & 7) << 1) | (DIP_MANUAL if manual else 0) | \
+           (0x20 if steady_phase else 0) | (0x40 if steady_drift else 0)
+
+
+@rtl_only
+async def test_dip_switches_pick_the_palette(dut):
+    """Manual mode holds the palette the switches name, and follows them when
+    they move. It takes two agreeing frame samples, so a config byte crossing
+    one frame boundary can't be mistaken for a switch setting; streaming
+    ignores the switches entirely, because ui_in is pixel data then; and the
+    first valid config header hands the pins to the host for good."""
+    cocotb.start_soon(Clock(dut.clk, CLK_PS, unit="ps").start())
+    await reset(dut)  # Digilent, preset 0
+    core = dut.user_project.core
+
+    dut.ui_in.value = dip(palette=5, manual=True)
+    await next_frame_start(dut)
+    assert int(core.preset_idx.value) == 0, "one sample must not be enough"
+    await next_frame_start(dut)
+    assert int(core.preset_idx.value) == 5, "two agreeing samples should apply"
+    assert int(core.pal_params.value) == segments.pack_params(segments.PRESET_PARAMS[5])
+    assert int(core.auto_pal.value) == 0, "manual mode must stop the automatic change"
+
+    dut.ui_in.value = dip(palette=2, manual=True)
+    await next_frame_start(dut)
+    await next_frame_start(dut)
+    assert int(core.preset_idx.value) == 2, "manual mode should follow the switches"
+
+    # Stream mode: ui_in is pixel data, so nothing here is a switch.
+    dut.uio_in.value = UIO_MODE
+    dut.ui_in.value = dip(palette=7, manual=True)
+    await next_frame_start(dut)
+    await next_frame_start(dut)
+    assert int(core.preset_idx.value) == 2, "streaming must ignore the switches"
+    dut.uio_in.value = 0
+
+    # A valid header is a host taking over: the switches are dead after it,
+    # and the setting they last applied stays in force.
+    await send_config(dut, segments.config_packet(None))
+    assert int(core.cfg.dip_live.value) == 0
+    dut.ui_in.value = dip(palette=7, manual=True)
+    await next_frame_start(dut)
+    await next_frame_start(dut)
+    assert int(core.preset_idx.value) == 2, "a config header must freeze the switches"
+    dut._log.info("DIP palette switches debounce, follow, and yield to a host")
+
+
+@rtl_only
+async def test_fade_dims_the_frame_around_a_palette_change(dut):
+    """The automatic palette change hides itself in a fade through black, and
+    the fade is the model's. The level is checked at the interesting frame
+    counts, then a whole dimmed frame is captured and compared segment for
+    segment -- which is what says zoneplate.v scales the level the same way
+    attract_proto.apply_fade() does, not merely that something got darker.
+
+    Manual mode holds one palette, so there is no change to hide and no fade.
+    """
+    import attract_proto
+
+    cocotb.start_soon(Clock(dut.clk, CLK_PS, unit="ps").start())
+    await reset(dut)
+    core = dut.user_project.core
+
+    # Purely combinational off frame_ctr, so poking it is the whole test.
+    for k in (0, 1, 2, 15, 31, 32, 33, 240, 479, 480, 481, 496, 510, 511):
+        core.frame_ctr.value = k
+        await ClockCycles(dut.clk, 2)
+        assert int(core.gen_fade.value) == attract_proto.chip_fade(k), (
+            f"fade at frame_ctr {k}: RTL {int(core.gen_fade.value)}, "
+            f"model {attract_proto.chip_fade(k)}"
+        )
+
+    # A dimmed frame, pixel for pixel. 500 puts the capture a few frames into
+    # the fade-out, well clear of both the full-brightness plateau and the
+    # black frames at the wrap.
+    core.frame_ctr.value = 0x1F4
+    await capture_frame(dut)
+    shown = int(core.frame_ctr.value) - 1
+    fade = attract_proto.chip_fade(shown)
+    assert 0 < fade < 15, f"frame {shown} isn't part-way through a fade (level {fade})"
+
+    # frame_ctr was poked, so the motion registers can't be simulated from
+    # reset here: take them from the chip and undo the one step they have
+    # made since the captured frame. chip_step() uses the rate for the frame
+    # it starts from, which is the frame that was shown.
+    rate_ph, rate_t = attract_proto.chip_rates(shown)
+    ring_ph = (int(core.zp.ring_ph.value) - rate_ph) & attract_proto.RING_MASK
+    t_src = (int(core.zp.t_src.value) - rate_t) & attract_proto.T_SRC_MASK
+
+    width, _, px = read_ppm("frame.ppm")
+    check_against_model(px, width,
+                        attract_proto.zoneplate_at(t_src >> 3, ring_ph >> 2, fade),
+                        f"attract_proto's chip at frame {shown}, fade {fade}")
+
+    # Manual mode: nothing is changing, so nothing is hidden.
+    dut.ui_in.value = dip(palette=3, manual=True)
+    await next_frame_start(dut)
+    await next_frame_start(dut)
+    core.frame_ctr.value = 0x1F4
+    await ClockCycles(dut.clk, 2)
+    assert int(core.auto_pal.value) == 0
+    assert int(core.gen_fade.value) == 15, "manual mode must never fade"
+    dut._log.info("fade matches attract_proto at level %d, and is off in manual mode", fade)
 
 
 # --------------------------------------------------------------------------

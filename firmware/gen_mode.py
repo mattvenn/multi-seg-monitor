@@ -1,6 +1,16 @@
 """
 Bring the FPGA up in internal-generator mode, no streaming.
 
+Note what this does to the DIP switches. In generator mode the chip reads
+ui_in[6:1] as live switches (src/config_port.v), and this script drives
+ui_in[3:0] as outputs to set the reset strap and then leaves them driven. So
+the strapped palette is also the manual-mode palette, which is consistent, but
+ui_in[6:4] are left floating unless the demoboard's switches are set: whatever
+they settle at chooses manual-vs-auto palette and the two variation modes.
+Sending a config packet -- `curve=` or `cycle=False` below -- clears the chip's
+dip_live latch and freezes the switches at whatever was last applied, which is
+usually what you want when driving the board from the RP2350.
+
 `seg_player.py`'s mode pin (uio[7]) can't be flipped on its own from a bare
 `machine.Pin` call in a separate mpremote session: the bitstream push
 (spi_transferPIO) and pixel clock (clock_project_PWM) don't survive between
@@ -68,12 +78,15 @@ def main(pmod_type=1, palette=3, cycle=True, curve=None):
     PmodVGA, 1=Tiny VGA; palette 0-7 selects one of the chip's built-in
     presets (tools/palette_builder/presets.json) to start from.
 
-    `cycle` (the chip's own default) steps through all 8 presets every 256
-    frames, about 4 s. `curve` loads a custom palette instead, as three
-    (x1, y1, x2, y2) point pairs for R, G, B -- palette_builder's Export
-    prints a ready-made call; it always switches cycling off, because the
-    next cycle step would overwrite it. Both go in as a config packet, see
-    src/config_port.v.
+    `cycle` (the chip's own default) steps through all 8 presets every 512
+    frames, about 8.5 s, fading through black across each change. `curve`
+    loads a custom palette instead, as three (x1, y1, x2, y2) point pairs for
+    R, G, B -- palette_builder's Export prints a ready-made call; it always
+    switches cycling off, because the next cycle step would overwrite it.
+    Both go in as a config packet, see src/config_port.v.
+
+    Either one also ends the chip's reading of the ui_in DIP switches for
+    good -- see the note at the top of this file.
     """
     from ttboard.demoboard import DemoBoard
     import ttboard.fpga.fabricfoxv2 as fpgaloader
