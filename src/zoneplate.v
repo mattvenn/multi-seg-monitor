@@ -17,7 +17,7 @@
 // Nothing here is stored per pixel: each segment's level is a pure function of
 // its position and the frame number, so the chip still holds no framebuffer.
 // The generator asks for one line-buffer byte -- two segments -- at a time and
-// writes it when `ready` rises; a byte takes ~12 cycles against the ~66 a
+// writes it when `ready` rises; a byte takes ~12 cycles against the ~110 a
 // digit row allows per byte, so the row is still built well before it is
 // drawn.
 //
@@ -103,10 +103,19 @@ module zoneplate (
     //
     // attract_proto._sources() at drift 4: phases are t * {24,16,16,20} / 16
     // (the last two offset by 600 and 1400 so the two points don't move in
-    // step), folded into a 0..2047 triangle, then scaled to the grid:
-    // * 768 >> 11 is * 3 >> 3, and * 592 >> 11 is * 37 >> 7. Only bits
-    // [15:4] of each product matter -- the triangle wraps at 4096 -- so the
-    // products are 16 bits, as shift-and-adds rather than multipliers.
+    // step), folded into a 0..2047 triangle, then scaled by
+    // * 768 >> 11, which is * 3 >> 3, and * 592 >> 11, which is * 37 >> 7.
+    // Only bits [15:4] of each product matter -- the triangle wraps at 4096
+    // -- so the products are 16 bits, as shift-and-adds rather than
+    // multipliers.
+    //
+    // 768 x 592 is not this grid: the grid is 53 * 15 by 27 * 22, 795 x 594.
+    // The points are deliberately left roaming the smaller range, because
+    // 3 >> 3 and 37 >> 7 are two adders where 795 and 594 are multipliers on
+    // the path that already carries the longest arithmetic in the design, and
+    // sources that stop 27 pixels short of two edges is not something anyone
+    // can see in a field of rings. attract_proto.SRC_W/SRC_H hold the same
+    // pair, so the model stays bit-exact.
     //
     // t is t_src's integer part. With rate_t held at 8 it counts frames, which
     // is exactly what this computed before the accumulator went in.
@@ -132,26 +141,29 @@ module zoneplate (
     // Segment centres
     //
     // The centre of each segment rectangle (tools/segments.py SEGMENTS),
-    // rounded down, relative to its cell: a (4,0) b (8,3) c (8,9) d (4,12)
-    // e (0,9) f (0,3) g (4,6). y needs no adder -- CELL_H is 16 and every
-    // offset is under 16 -- and col * 12 is col * 8 + col * 4.
+    // rounded down, relative to its cell: a (6,1) b (10,5) c (10,13)
+    // d (6,17) e (1,13) f (1,5) g (6,9). oy needs 5 bits now that the cell is
+    // 22 tall, and both multiplies are shift-and-adds: col * 15 is
+    // col * 16 - col, row * 22 is row * 16 + row * 4 + row * 2.
     // ------------------------------------------------------------------
     reg        half;        // 0: the byte's low segment, 1: its high one
     wire [2:0] seg = {byte_idx, half};
-    reg  [3:0] ox, oy;
+    reg  [3:0] ox;
+    reg  [4:0] oy;
     always @* begin
         case (seg)
-            3'd0:    {ox, oy} = {4'd4, 4'd0};
-            3'd1:    {ox, oy} = {4'd8, 4'd3};
-            3'd2:    {ox, oy} = {4'd8, 4'd9};
-            3'd3:    {ox, oy} = {4'd4, 4'd12};
-            3'd4:    {ox, oy} = {4'd0, 4'd9};
-            3'd5:    {ox, oy} = {4'd0, 4'd3};
-            default: {ox, oy} = {4'd4, 4'd6};   // g; DP (7) is never sampled
+            3'd0:    {ox, oy} = {4'd6,  5'd1};
+            3'd1:    {ox, oy} = {4'd10, 5'd5};
+            3'd2:    {ox, oy} = {4'd10, 5'd13};
+            3'd3:    {ox, oy} = {4'd6,  5'd17};
+            3'd4:    {ox, oy} = {4'd1,  5'd13};
+            3'd5:    {ox, oy} = {4'd1,  5'd5};
+            default: {ox, oy} = {4'd6,  5'd9};  // g; DP (7) is never sampled
         endcase
     end
-    wire [9:0] sx_px = {1'b0, col, 3'b0} + {2'b0, col, 2'b0} + {6'b0, ox};
-    wire [9:0] sy_px = {row, oy};
+    wire [9:0] sx_px = {col, 4'b0} - {4'b0, col} + {6'b0, ox};
+    wire [9:0] sy_px = {row, 4'b0} + {2'b0, row, 2'b0} + {3'b0, row, 1'b0}
+                       + {5'b0, oy};
 
     // ------------------------------------------------------------------
     // One sample: |dx|^2 + |dy|^2 for each point, a square a cycle

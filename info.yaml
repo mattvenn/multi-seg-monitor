@@ -3,7 +3,7 @@ project:
   title:        "Multi Segment Monitor"
   author:       "Matt Venn & Claude"
   discord:      "mattvenn"
-  description:  "Simulates a 64x37 array of 7 segment displays on a VGA screen"
+  description:  "Simulates a 53x27 array of 7 segment displays on a VGA screen"
   language:     "Verilog"
   clock_hz:     40000000
 

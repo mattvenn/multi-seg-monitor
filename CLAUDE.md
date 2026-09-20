@@ -4,9 +4,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Tiny Tapeout ASIC that renders a 64x37 grid of 7-segment digits (2368 digits,
-18944 segments, 4 bits of brightness each) as an 800x600@60Hz VGA signal. Data is
-streamed in a byte at a time by the demoboard's RP2350. `SPEC.md` carries the full
+A Tiny Tapeout ASIC that renders a 53x27 grid of 7-segment digits (1431 digits,
+11448 segments, 4 bits of brightness each) as an 800x600@60Hz VGA signal. Data is
+streamed in a byte at a time by the demoboard's RP2350.
+
+**This branch (`digit-shape`) carries a different glyph from `main`**: a fat
+13x20 body in a 15x22 cell, where `main` has 10x14 in 12x16 on a 64x37 grid.
+That is `tools/shapes.py`'s `digit(thick_h=4, len_h=5, thick_v=4, len_v=4,
+gap_x=2, gap_y=2)` — run it and it prints the grid, the margins, the band table
+and the byte rate below. Every number in this file follows the glyph, so don't
+carry one across to `main` without recomputing it.
+
+`SPEC.md` carries the full
 design and the reasoning behind the rejected alternatives; read it before proposing
 an architectural change, because most obvious ones were already considered there.
 It documents the original 640x480@72Hz mode's arithmetic throughout -- the digit
@@ -91,14 +100,16 @@ drawn. Everything below follows from that.
 `tt_um_multi_seg_monitor.v` is the TT wrapper and does nothing but pin mapping.
 `multi_seg_monitor.v` is the core, and it is where the interesting timing lives:
 
-- **Line buffer** (`line_buffer.v`) holds **four** rows of 256 bytes, exactly filling
-  the 1 kB address space with no spare left. Four rather than two is what lets the
-  host free-run at a fixed byte rate between one and three rows ahead instead of
+- **Line buffer** (`line_buffer.v`) holds **four** rows at a 256-byte stride,
+  exactly filling the 1 kB address space. A row is 212 bytes at this glyph's 53
+  columns, so 44 bytes of each buffer go unused; 64 columns is the wall, since
+  `fetch_col` is 6 bits. Four rows rather than two is what lets the host
+  free-run at a fixed byte rate between one and three rows ahead instead of
   handshaking every row.
-- **Single-port discipline.** The renderer reads 2 of every 12 cycles to prefetch
+- **Single-port discipline.** The renderer reads 2 of every 15 cycles to prefetch
   the next digit — only the two bytes holding the two segments the current
   scanline can show, not all four; `wr_grant = !lb_re` gives writes the other
-  10. `we` and `re` must **never** be high in the same cycle — on the IHP macro that combination is
+  13. `we` and `re` must **never** be high in the same cycle — on the IHP macro that combination is
   write-through and would silently put `wdata` at `raddr`. `tb.v` asserts this every
   cycle rather than trusting the arbitration.
 - **Two memory implementations behind one interface.** Undefined, `line_buffer.v`
@@ -108,9 +119,13 @@ drawn. Everything below follows from that.
   `test/models/`. Changes to the buffer must be tested both ways — CI runs the suite
   twice for this reason.
 - **Renderer** decodes each segment as one AND of an x zone and a y zone. The digit
-  body is 10x14 inside a 12x16 cell; the spare column and two spare rows are
+  body is 13x20 inside a 15x22 cell; the two spare columns and two spare rows are
   load-bearing, not cosmetic — without them neighbouring digits merge and the grid
-  reads as a mesh.
+  reads as a mesh. `cy` and `row` are counters, not slices of `y_px`: 22 is not a
+  power of two. Column 0's prefetch runs in the last two cycles of horizontal
+  blanking rather than the first two pixels of the line, because the fetch is two
+  cycles deep and the left margin is only 2 px wide — that silently needed
+  `MARGIN_X >= 4` and nothing said so.
 - **Source mux**: internal generator (`uio[7]` low, needs no external data, is the
   silicon bring-up safety net) or the stream port (`stream_in.v`). The write pointer
   resets on vsync, so the link is self-synchronising.
@@ -137,15 +152,31 @@ drawn. Everything below follows from that.
 
 ### Pacing is the load-bearing invariant
 
-A digit row is 16 scanlines and 256 bytes, so `16 * 1056 / 256 = 66` pixel clocks per
-byte, **exactly**. No remainder means a fixed-rate host tracks the raster
-indefinitely. The host's whole head start is vertical blanking, 713 µs, and anything
-spent before its first byte comes straight off it — the budget from vsync to first
-byte is about **450 µs**, same as before: `resolution_discussion.md` section 11
-found the delay-sweep tearing threshold itself didn't move when the resolution did,
-only the margin above it shrank. This is not theoretical: exceeding it is what tore the
-picture on hardware, and `make -C test delay-sweep` reproduces it in simulation.
-See "If the picture tears" in `README.md`.
+A digit row is 22 scanlines and 212 bytes, so `22 * 1056 / 212 = 5808/53`, about
+**109.58** pixel clocks per byte. Unlike `main`'s 66 that is **not** a whole
+number, and it doesn't need to be: the RP2350 clocks the strobe from a PIO
+divider (16.8 fixed point) and both ends restart on vsync, so the remainder
+neither accumulates nor needs tracking. `firmware/seg_player.py` keeps the
+fraction; `test/test_multi_seg.py` floors it to 109 and so runs about 0.15 of a
+digit row fast over a frame, which is inside the window on purpose.
+
+What the glyph *did* cost is head start. Vertical blanking is a fixed 28512
+clocks (713 µs) whatever the cell, but a digit row went from 16 scanlines to 22,
+so that blanking is worth **1.23 digit rows** of lead where it used to be worth
+1.69 — and the lead has to stay above one row. Anything spent before the host's
+first byte comes straight off it. Measured by `make -C test delay-sweep` on this
+glyph: clean through **250 µs**, first corruption at 300 µs (14 of 11448
+segments, the last three columns of the top eight digit rows). On `main` the
+same sweep put it near 450 µs. So the budget is roughly **250 µs**, down from
+450, against an RP2350 vsync-interrupt jitter under 10 µs.
+
+Note the threshold is much kinder than the row arithmetic alone suggests (which
+says 135 µs): the renderer re-fetches column by column across the row, so the
+host has to be ahead *at each column*, not a full row ahead when the row starts.
+That slack is real but it is not a budget anyone should spend deliberately.
+
+This is not theoretical: exceeding it is what tore the picture on hardware, and
+the sweep reproduces it in simulation. See "If the picture tears" in `README.md`.
 
 ### Palettes are data, generated into RTL
 
@@ -175,22 +206,24 @@ thickness and a length for each orientation plus the gap to the next digit,
 lets the cell and the grid follow those six numbers, and exists for trying
 other proportions under the zone plate in the palette builder's Digit tab
 before anyone touches Verilog. The RTL has exactly one set of rectangles on
-one 64x37 grid, and `shapes.CHIP` — the sliders at their defaults —
-reproduces `segments.SEGMENTS` rectangle for rectangle, on the same grid with
-the same margins (the test says so).
+one 53x27 grid, and `shapes.CHIP` — the sliders at their defaults, which on
+this branch are `4/5/4/4/2/2` — reproduces `segments.SEGMENTS` rectangle for
+rectangle and `zoneplate.v`'s sample table point for point, on the same grid
+with the same margins (the test says so).
 
 Because the cell is a result rather than a constant there, a variant changes
 more than the glyph: `cols` stops at 64 (the line buffer holds four rows at a
 256-byte stride, and `fetch_col` is 6 bits), `rows` is whatever fits in 600,
 and the host sends a byte every `cell_h * 1056 / (cols * 4)` pixel clocks. The
 tab reports all three. That period need **not** be a whole number — the chip's
-66 is, but the RP2350 clocks the strobe from a PIO divider (16.8 fixed point)
-and both ends realign on vsync, so a fractional period neither accumulates nor
-needs tracking; what the host must do is start inside the line buffer's
-window, one to three rows ahead. The 64-column wall is the only hard limit on
-a glyph; a `cell_h` that isn't a power of two costs a row counter in place of
-`row = y_rel[9:4]`, which `warnings()` mentions because it is a real cost, not
-because it is a reason not to.
+own is 5808/53 — because the RP2350 clocks the strobe from a PIO divider (16.8
+fixed point) and both ends realign on vsync, so a fractional period neither
+accumulates nor needs tracking; what the host must do is start inside the line
+buffer's window, one to three rows ahead. The 64-column wall is the only hard
+limit on a glyph. A `cell_h` that isn't a power of two used to cost a row
+counter in place of `row = y_rel[9:4]` and `warnings()` said so; the RTL has
+that counter now, for its own 22-tall cell, so every height costs the same and
+the warning is gone.
 
 `validate()` is the separate question of whether a variant could be built at
 all: the prefetch fetches two nibbles per digit per scanline, so no scanline
@@ -288,6 +321,11 @@ flops), so expect ~91%. An IHP `dfrbpq_1` flop is 49 µm² — flops are the
 expensive thing here, and placement adds about x1.15 over synthesised area for
 new logic (x1.4 over the whole design).
 
+This glyph adds 11 flops on top of that — `cy` (5) and `row` (6), which used to
+be slices of `y_px` — for about 0.6k µm² placed, under half a point. Everything
+else it changed was constants. Watch the CI number rather than trusting that
+estimate.
+
 **That is over budget** (80% comfortable, 85% with work). The cheapest lever is
 not in the RTL: `FP_MACRO_HORIZONTAL_HALO`/`FP_MACRO_VERTICAL_HALO` are at
 LibreLane's default of 10 µm and nothing in `src/config.json` sets them. The
@@ -305,6 +343,11 @@ at 40 MHz with a ~35 MHz report without trouble, so treat that as the bar rather
 than the pass/fail line. The critical path is the generator's `y_px` -> vsync
 comparator -> `frame_start` -> zone-plate FSM enables. The attract variations
 sit at 33.2-34.0 across the same seeds, about 0.9 MHz down.
+
+This glyph is neutral against that: **33.1-35.3 MHz across seeds 0-3** (33.8,
+35.3, 33.1, 33.4), same critical path, 1167 of 5280 LCs. The `cy`/`row` counters
+replaced a 10-bit subtract and neither end of that is anywhere near the
+`y_px` -> vsync chain.
 
 Getting them there took three flops, and each one is worth knowing about
 because the same trap is waiting for anything else hung off `frame_start` or

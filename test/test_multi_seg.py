@@ -26,11 +26,12 @@ V_ACTIVE, V_FP, V_SYNC, V_BP = 600, 1, 4, 23
 H_TOTAL = H_ACTIVE + H_FP + H_SYNC + H_BP  # 1056
 V_TOTAL = V_ACTIVE + V_FP + V_SYNC + V_BP  # 628
 
-# Grid geometry -- docs/superpowers/specs/2026-08-11-800x600-mode-design.md
-COLS, ROWS = 64, 37
-CELL_W, CELL_H = 12, 16
-MARGIN_X = 16
-MARGIN_Y = 4
+# Grid geometry -- tools/shapes.py's digit(thick_h=4, len_h=5, thick_v=4,
+# len_v=4, gap_x=2, gap_y=2), mirrored in tools/segments.py and the RTL.
+COLS, ROWS = 53, 27
+CELL_W, CELL_H = 15, 22
+MARGIN_X = 2
+MARGIN_Y = 3
 
 # The GDS action runs the suite as `GATES=yes make`.  Tests that reach into
 # user_project for internal nets (or into tb.v's RTL-only palette instance)
@@ -156,10 +157,11 @@ async def test_render_frame(dut):
     def lit(x, y):
         return px[(y * width + x) * 3] != 0
 
-    # Margins: 64 columns of 12 pixels leaves 16 blank either side, 37 rows of 16
-    # leaves 4 blank top and bottom.  Reporting the first/last lit row or column
-    # rather than the first offending pixel makes a misaligned capture obvious at
-    # a glance.
+    # Margins: 53 columns of 15 pixels leaves 2 blank on the left and 3 on the
+    # right, 27 rows of 22 leaves 3 blank top and bottom -- the grid no longer
+    # centres evenly, so MARGIN_X/MARGIN_Y are the left and top ones.  Reporting
+    # the first/last lit row or column rather than the first offending pixel
+    # makes a misaligned capture obvious at a glance.
     cols_lit = [x for x in range(width) if any(lit(x, y) for y in range(0, height, 3))]
     assert cols_lit, "nothing rendered at all"
     assert cols_lit[0] >= MARGIN_X, (
@@ -179,18 +181,22 @@ async def test_render_frame(dut):
     )
 
     # Cell corners are where an x zone and a y zone both miss, so nothing selects
-    # a segment and they must stay dark.
+    # a segment and they must stay dark.  Taken off the rectangles rather than
+    # written out, so they follow the glyph: the left rail's own columns against
+    # the top and bottom bars' rows, plus the gap row under the body.
+    d_y1 = segments.SEGMENTS[3][4]  # d, the bottom bar: its last row
+    corners = ((0, 0), (1, 1), (0, d_y1), (1, d_y1 - 1), (0, CELL_H - 1))
     for row in range(0, ROWS, 3):
         for col in range(0, COLS, 5):
             x0 = MARGIN_X + col * CELL_W
             y0 = MARGIN_Y + row * CELL_H
-            for dx, dy in ((0, 0), (1, 1), (0, 15), (1, 14)):
+            for dx, dy in corners:
                 assert not lit(x0 + dx, y0 + dy), (
                     f"corner lit in cell ({col}, {row}) at offset ({dx}, {dy})"
                 )
 
     # Every digit row carries data: row 0 is built during vertical blanking and
-    # rows 1..36 during the row before, so a blank row means the generator or the
+    # rows 1..26 during the row before, so a blank row means the generator or the
     # buffer swap is out of step.
     for row in range(ROWS):
         band = sum(
@@ -345,10 +351,15 @@ UIO_STB = 1 << 6
 UIO_IDLE = UIO_MODE
 UIO_STROBE = UIO_MODE | UIO_STB
 
-# One digit row is 16 scanlines and 256 bytes, so a byte every 66 pixel clocks
-# tracks the raster exactly.  The division is exact, which is what lets the host
-# free-run instead of resynchronising every row.
-BYTE_PERIOD = CELL_H * H_TOTAL // segments.ROW_BYTES
+# One digit row is 22 scanlines and 212 bytes, so the raster is tracked by a
+# byte every 5808/53 = 109.58 pixel clocks.  The division no longer comes out
+# whole -- it did at 16 scanlines and 256 bytes -- so this test host, pacing at
+# the floor of 109, sends about 0.5% fast: over a 5724 byte frame that is
+# 3323 clocks, about 0.15 of a digit row, on top of the 1.23 rows of head start
+# vertical blanking gives it.  Still inside the line buffer's one-to-three-row
+# window, and still no resynchronising.  The real host (firmware/seg_player.py)
+# keeps the fraction, because its PIO divider is 16.8 fixed point.
+BYTE_PERIOD = CELL_H * H_TOTAL // segments.ROW_BYTES  # 109
 
 
 async def push_byte(dut, value):
@@ -943,31 +954,39 @@ async def test_fade_dims_the_frame_around_a_palette_change(dut):
 # which is exactly why this sweep is worth re-running at the new timing rather
 # than assumed safe by analogy.
 #
-# What that does to the picture: the renderer re-fetches the whole 256 byte row
-# on every one of its 16 scanlines, sweeping it in 1056 clocks, while the host
-# fills that same row over 16896.  Once the lead is smaller than a row the
+# What that does to the picture: the renderer re-fetches the whole 212 byte row
+# on every one of its 22 scanlines, sweeping it in 1056 clocks, while the host
+# fills that same row over 23232.  Once the lead is smaller than a row the
 # renderer overtakes the host partway across, so the left of each digit row is
 # the byte the host just wrote and the right is whatever was in that buffer
 # before -- which, four buffers deep, is digit row R-4 of the previous frame.
 # A still image tears just as visibly as a moving one for that reason: the stale
 # bytes are not the same row again, they are a row from elsewhere in the picture.
 #
-# Off by default -- set DELAY_SWEEP.  Each case captures a full frame, so the ten
-# of them cost roughly ten minutes.
+# Off by default -- set DELAY_SWEEP.  Each case captures a full frame, so the
+# thirteen of them cost roughly ten minutes under icarus.
 # --------------------------------------------------------------------------
 
 # Vsync falling to the first active line: 4 sync + 23 back porch lines.  This is
 # the entire head start, and the delay comes straight off it.
 V_LEAD_CLOCKS = (V_SYNC + V_BP) * H_TOTAL  # 28512, 713 us at 40 MHz
 
-# A frame's 9472 bytes at 66 clocks each is 625152 of the 663168 clocks in a
-# frame, so beyond ~950 us of delay the push no longer fits between two vsyncs
+# A frame's 5724 bytes at 109 clocks each is 623916 of the 663168 clocks in a
+# frame, so beyond ~980 us of delay the push no longer fits between two vsyncs
 # and the tail is cut off by the pointer reset instead -- a different failure.
-# The sweep stops at 900 us, just inside that.
+# The sweep stops at 900 us, just inside that.  (That ceiling barely moved with
+# the glyph: a third as many bytes going out at not quite twice the spacing.)
+#
+# The floor did move, and it is why the steps are 50 us up to 300.  The head
+# start is a fixed 28512 clocks of vertical blanking, but a digit row is now 22
+# scanlines rather than 16, so the same blanking is worth 1.23 rows where it
+# used to be worth 1.69 -- and the lead has to stay above one.  The arithmetic
+# puts the threshold near 135 us against the old ~290; resolving that needs
+# finer steps than the ~950 us ceiling does.
 #
 # 0 is the control: the same card, the same path, no delay.  Without it there is
 # no way to tell tearing from the card simply being hard to read as digits.
-DELAYS_US = [0] + list(range(100, 901, 100))
+DELAYS_US = [0] + list(range(50, 301, 50)) + list(range(400, 901, 100))
 
 TESTCARD = os.path.join(os.path.dirname(__file__), "testcard.seg")
 

@@ -468,7 +468,10 @@ def test_the_cell_and_the_grid_follow_the_settings():
     assert (chip.cols, chip.rows) == (segments.COLS, segments.ROWS)
     assert (chip.margin_x, chip.margin_y) == (segments.MARGIN_X, segments.MARGIN_Y)
     assert chip.frame_bytes == segments.FRAME_BYTES
-    assert chip.clocks_per_byte == 66  # the pacing invariant, exact
+    # The pacing ratio, exact as a fraction and not as an integer: 22 * 1056
+    # over 212.  The host's PIO divider is 16.8 fixed point and both ends
+    # realign on vsync, so the remainder never accumulates.
+    assert chip.clocks_per_byte == Fraction(5808, 53)
     assert shapes.warnings(chip) == []
 
 
@@ -589,8 +592,8 @@ def test_the_default_proportions_are_the_chips_own_geometry():
 
     rtl = (Path(__file__).resolve().parents[2] / "src" / "zoneplate.v").read_text()
     table = {int(n): (int(ox), int(oy)) for n, ox, oy in
-             re.findall(r"3'd(\d):\s+\{ox, oy\} = \{4'd(\d+), 4'd(\d+)\}", rtl)}
-    default = re.search(r"default: \{ox, oy\} = \{4'd(\d+), 4'd(\d+)\}", rtl)
+             re.findall(r"3'd(\d):\s+\{ox, oy\} = \{4'd(\d+),\s+5'd(\d+)\}", rtl)}
+    default = re.search(r"default: \{ox, oy\} = \{4'd(\d+),\s+5'd(\d+)\}", rtl)
     table[6] = (int(default.group(1)), int(default.group(2)))  # g; 7 is never sampled
     assert len(table) == 7, table
     for seg, point in table.items():
@@ -598,11 +601,13 @@ def test_the_default_proportions_are_the_chips_own_geometry():
 
 
 def test_warnings_name_the_costs_and_not_the_ratios():
-    """warnings() is for what a setting costs -- gaps that merge the grid, a
-    cell height the renderer can't slice -- and not for a byte period that
-    happens to be fractional. The host clocks the strobe from a PIO divider
-    and both ends realign on vsync, so a period like 5808/53 costs nothing;
-    saying otherwise would rule out most glyphs for no reason."""
+    """warnings() is for what a setting costs -- gaps that merge the grid --
+    and not for a byte period that happens to be fractional, nor for a cell
+    height that isn't a power of two. The host clocks the strobe from a PIO
+    divider and both ends realign on vsync, so a period like 5808/53 costs
+    nothing; and the renderer counts cy and row rather than slicing them out
+    of y_px, so every height costs the same. Saying otherwise would rule out
+    most glyphs for no reason."""
     import shapes
 
     touching = shapes.digit(gap_x=0)
@@ -612,16 +617,13 @@ def test_warnings_name_the_costs_and_not_the_ratios():
     assert any("touches the next digit" in m for m in shapes.warnings(shapes.digit(gap_x=1)))
     assert any("run together" in m for m in shapes.warnings(shapes.digit(gap_y=0)))
 
-    # A cell height that isn't a power of two: a real cost, and a small one.
-    odd = shapes.digit(gap_y=3)
-    assert odd.cell_h == 17
-    assert any("row counter" in m for m in shapes.warnings(odd))
-    assert not any("power of two" in m for m in shapes.warnings(shapes.digit(gap_y=2)))
+    # Neither a fractional byte period nor an odd cell height is a complaint.
+    for params in (dict(gap_y=3), dict(thick_h=2, len_h=6, thick_v=2, len_v=4),
+                   shapes.DEFAULTS):
+        assert shapes.warnings(shapes.digit(**params)) == [], params
 
-    # A fractional byte period is not a complaint, anywhere.
-    fractional = shapes.digit(thick_h=4, len_h=5, thick_v=4, len_v=4)
+    fractional = shapes.digit(**shapes.DEFAULTS)
     assert fractional.clocks_per_byte.denominator != 1
-    assert not any("whole number" in m or "drift" in m for m in shapes.warnings(fractional))
     assert fractional.byte_rate > 0
     # ...and the one wall that is real: the line buffer holds 64 digits a row.
     assert fractional.cols <= shapes.MAX_COLS and fractional.row_bytes <= 256

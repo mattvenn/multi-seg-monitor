@@ -50,6 +50,23 @@ of two**, so `cy`/`row` can no longer be a slice of `y_px`, and the **byte
 period is fractional**, which the firmware's PIO setup currently assumes away.
 Neither is a blocker; both need real edits.
 
+Two more turned up when this plan was checked against the RTL, and both are
+now done:
+
+- **MARGIN_X 2 broke column 0's prefetch.** `fetch_en` fetched column 0 at
+  `x_px` 0 and 1, and the fetch is two cycles deep (the line buffer's
+  registered read, then `fetch_en_d`), so `next_digit` was only complete at
+  `x_px` 3 — after `cur_digit <= next_digit` at `x_px == MARGIN_X-1 == 1`.
+  The design has always needed `MARGIN_X >= 4` and nothing said so. Column 0
+  now fetches in the last two cycles of horizontal blanking (`&x_px[10:1]`).
+  Confirmed both ways: with the old `fetch_en`, `test_stream_frame` reports
+  205 of 11448 segments wrong, all of them in column 0.
+- **The pacing budget shrank.** Vertical blanking is a fixed 28512 clocks but
+  a digit row grew from 16 scanlines to 22, so the host's head start fell from
+  1.69 digit rows to 1.23. The delay sweep measures the new threshold at
+  **~250 µs** (clean at 250, 14 segments wrong at 300) against ~450 on `main`.
+  `CLAUDE.md` and `README.md` carry the measured table.
+
 ## Branching
 
 The branch exists and this file is committed on it. The working tree still
@@ -74,6 +91,7 @@ produced these dimensions. The geometry change is a second commit.
   `cy == CELL_H-1` → `cy <= 0, row <= row + 1`, else `cy <= cy + 1`. It must
   land before `x_px == 0` because the prefetch at `x_px < 2` already reads the
   y zones. `cy` is 5 bits, `row` stays 6; `render_buf = row[1:0]` unchanged.
+- Column 0's prefetch moves into blanking; see "Starting cold" above.
 - Zones: `xz_left cx<4`, `xz_mid 4..8`, `xz_right 9..12`, `xz_dp cx==13`
   (14 is the gap); `yz_top cy<4`, `yz_up 4..7`, `yz_mid 8..11`,
   `yz_low 12..15`, `yz_bot 16..19` (20,21 the gap). Slot mapping and
@@ -89,8 +107,11 @@ produced these dimensions. The geometry change is a second commit.
   roam 768x592 of the 795x594 grid, which is invisible and keeps the longest
   arithmetic chain as it is. Comment it as deliberate.
 
-Unchanged: `line_buffer.v`, `stream_in.v` (already parameterised on
-ROW_BYTES/ROWS), `config_port.v`, `VgaSyncGen.v`, the wrapper.
+Unchanged: `line_buffer.v`, `config_port.v`, `VgaSyncGen.v`, the wrapper.
+`stream_in.v` is already parameterised on ROW_BYTES/ROWS, but one of its formal
+asserts (`s_byte < ROW_BYTES`) was dead code at 256 bytes a row and is live at
+212 — an 8 bit register can power up above 212 — so it is now gated on
+`f_reset_done` exactly as the `s_row` bound beside it already was.
 
 ## Software mirrors
 
@@ -116,6 +137,16 @@ ROW_BYTES/ROWS), `config_port.v`, `VgaSyncGen.v`, the wrapper.
 - `test/test_multi_seg.py` lines 30-33 hold the geometry; `BYTE_PERIOD`
   (line 351) floors to 109, i.e. the test host runs ~0.15 of a row ahead over
   a frame — inside the one-to-three-row window, worth a comment.
+- The cell-corner offsets in `test_render_frame` were written out for a 12x16
+  cell (`(0,15)`, `(1,14)`); they come off `segments.SEGMENTS` now, so they
+  follow the glyph. `(0,15)` is segment e in this cell, which is how this was
+  found.
+- `tools/palette_builder/test_palette_builder.py` asserts the chip's byte
+  period is 66 and parses `4'd` out of `zoneplate.v`'s `{ox, oy}` table; both
+  move. `warnings()` loses the power-of-two message altogether — the RTL has
+  the row counter now, so every cell height costs the same.
+- The delay sweep steps by 50 µs up to 300 rather than 100 all the way: the
+  threshold moved down into the range where 100 µs steps can't see it.
 - Regenerate `test/testcard.seg` (`tools/testcard.sh`, ffmpeg is present) — it
   is a committed 9472-byte asset and the frame size changes.
 - Regenerate all three gold images: `SIM=verilator make -C test gold`, then

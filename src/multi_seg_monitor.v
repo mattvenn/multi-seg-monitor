@@ -2,7 +2,7 @@
 //
 // Multi Segment Monitor -- core
 //
-// Renders a 64 x 37 grid of 7 segment digits by racing the beam.  There is no
+// Renders a 53 x 27 grid of 7 segment digits by racing the beam.  There is no
 // framebuffer: only the digit row currently being drawn is resident, held in a
 // double buffered line buffer while the source fills the other half (SPEC.md
 // section 3).
@@ -25,17 +25,27 @@ module multi_seg_monitor (
     );
 
     // Grid geometry, fixed at synthesis (SPEC.md section 1).
-    localparam CELL_W    = 12;
-    localparam CELL_H    = 16;
-    localparam COLS      = 64;
-    localparam ROWS      = 37;
-    localparam MARGIN_X  = 16;              // (800 - COLS*CELL_W) / 2
-    localparam MARGIN_Y  = 4;               // (600 - ROWS*CELL_H) / 2
-    localparam ROW_BYTES = COLS * 4;        // 256 bytes per digit row -- the
+    //
+    // The fat glyph: a 13x20 body in a 15x22 cell, which is
+    // tools/shapes.py's digit(thick_h=4, len_h=5, thick_v=4, len_v=4,
+    // gap_x=2, gap_y=2) -- run it and it prints this grid, these margins and
+    // the band table the zones below implement.  SPEC.md and the numbers in
+    // it predate this glyph and describe the 12x16 cell on a 64x37 grid.
+    localparam CELL_W    = 15;
+    localparam CELL_H    = 22;
+    localparam COLS      = 53;
+    localparam ROWS      = 27;
+    localparam MARGIN_X  = 2;               // (800 - COLS*CELL_W) / 2
+    localparam MARGIN_Y  = 3;               // (600 - ROWS*CELL_H) / 2
+    localparam ROW_BYTES = COLS * 4;        // 212 bytes per digit row.  The
                                              // line buffer's wall (SPEC.md
-                                             // section 3): fetch_col below is
-                                             // a 6 bit field, so 64 is the most
-                                             // this design can ever address.
+                                             // section 3) is 64 columns:
+                                             // fetch_col below is a 6 bit
+                                             // field and the buffer holds four
+                                             // rows at a 256 byte stride, so
+                                             // 212 leaves 44 bytes of each row
+                                             // buffer unused rather than
+                                             // straining anything.
 
     wire [10:0] x_px;
     wire [9:0]  y_px;
@@ -64,11 +74,12 @@ module multi_seg_monitor (
     // ------------------------------------------------------------------
     // Grid coordinates
     //
-    // 800 does not divide by 12, so the column is tracked with a counter rather
-    // than a divider.  The row still doesn't need one: CELL_H is a power of two,
-    // so cy/row fall out of a slice once y_px is offset by MARGIN_Y -- unlike
-    // the old 640x480 mode, 600 doesn't divide evenly by 16, so that offset is
-    // no longer zero and can't be skipped.
+    // Neither axis divides, so both are counters.  The column always was one;
+    // the row used to be a slice of y_px, which only worked while CELL_H was
+    // 16 -- `cy = y_rel[3:0], row = y_rel[9:4]` off a subtract by MARGIN_Y.
+    // At CELL_H 22 that slice is gone and the pair below replaces it -- which
+    // is also why tools/shapes.py no longer warns about a cell height that
+    // isn't a power of two: with a counter here, every height costs the same.
     // ------------------------------------------------------------------
     reg [3:0] cx;
     reg [5:0] col;
@@ -90,9 +101,37 @@ module multi_seg_monitor (
         end
     end
 
-    wire [9:0] y_rel = y_px - MARGIN_Y;  // underflows harmlessly outside cell_y
-    wire [3:0] cy    = y_rel[3:0];
-    wire [5:0] row   = y_rel[9:4];
+    // Advanced once a line, in the first cycle of horizontal blanking.
+    // VgaSyncGen advances y_px on the edge where x_px == 799 and restarts x_px
+    // at 2048 - blackH = 1792, so from that cycle y_px already holds the line
+    // about to start -- and the update lands a full 256 cycles before the
+    // column 0 prefetch at x_px 2046 reads the y zones through slot0_seg /
+    // slot1_seg, and before render_buf is used.
+    //
+    // Outside cell_y the pair free-runs and means nothing, exactly as the
+    // underflowing y_rel did: visible is gated on cell_y, and the generator
+    // hardcodes gen_buf to 0 at frame_start rather than deriving it from row.
+    localparam [10:0] LINE_RESTART = 11'd1792;  // 2048 - (hfp + hpulse + hbp)
+
+    reg [4:0] cy;
+    reg [5:0] row;
+
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            cy  <= 0;
+            row <= 0;
+        end else if (x_px == LINE_RESTART) begin
+            if (y_px == MARGIN_Y) begin
+                cy  <= 0;
+                row <= 0;
+            end else if (cy == CELL_H - 1) begin
+                cy  <= 0;
+                row <= row + 1'b1;
+            end else begin
+                cy <= cy + 1'b1;
+            end
+        end
+    end
 
     // ------------------------------------------------------------------
     // Segment zones
@@ -100,22 +139,22 @@ module multi_seg_monitor (
     // Each segment is one AND of an x zone and a y zone -- the renderer below
     // uses both, the prefetch only the y zones.
     // ------------------------------------------------------------------
-    // The digit body is 10x14 inside the 12x16 cell.  The spare column and the
-    // spare two rows are what stop a digit's right rail merging into its
+    // The digit body is 13x20 inside the 15x22 cell.  The spare two columns
+    // and two rows are what stop a digit's right rail merging into its
     // neighbour's left rail, and one row's bottom bar merging into the next
     // row's top bar -- without them the grid reads as a mesh rather than as
-    // digits.  The decimal point lives in the spare column, which is where a
-    // real display puts it.
-    wire xz_left  = (cx < 2);                   // f, e
-    wire xz_mid   = (cx >= 2)  && (cx < 8);     // a, g, d
-    wire xz_right = (cx >= 8)  && (cx < 10);    // b, c
-    wire xz_dp    = (cx == 10);                 // DP, cx == 11 is the gap
+    // digits.  The decimal point lives in the first spare column, which is
+    // where a real display puts it.
+    wire xz_left  = (cx < 4);                   // f, e
+    wire xz_mid   = (cx >= 4)  && (cx < 9);     // a, g, d
+    wire xz_right = (cx >= 9)  && (cx < 13);    // b, c
+    wire xz_dp    = (cx == 13);                 // DP, cx == 14 is the gap
 
-    wire yz_top   = (cy < 2);                   // a
-    wire yz_up    = (cy >= 2)  && (cy < 6);     // f, b
-    wire yz_mid   = (cy >= 6)  && (cy < 8);     // g
-    wire yz_low   = (cy >= 8)  && (cy < 12);    // e, c
-    wire yz_bot   = (cy >= 12) && (cy < 14);    // d, DP; cy 14,15 is the gap
+    wire yz_top   = (cy < 4);                   // a
+    wire yz_up    = (cy >= 4)  && (cy < 8);     // f, b
+    wire yz_mid   = (cy >= 8)  && (cy < 12);    // g
+    wire yz_low   = (cy >= 12) && (cy < 16);    // e, c
+    wire yz_bot   = (cy >= 16) && (cy < 20);    // d, DP; cy 20,21 is the gap
 
     // Every segment sits in exactly one y zone, and no y zone crosses more than
     // two segments, so a scanline only ever shows two of a digit's eight
@@ -143,7 +182,16 @@ module multi_seg_monitor (
     // generator fills the other.  A digit is 4 bytes, but a scanline only shows
     // two of its nibbles (the slots above), so the next digit's two are
     // fetched a byte each over the first two pixels of the current one.
-    // Column 0 of each row is fetched during the left margin.
+    // Column 0 of each row is fetched in the last two cycles of horizontal
+    // blanking.
+    //
+    // Blanking rather than the first two pixels of the line, which is where
+    // column 0's fetch used to sit.  The fetch is two cycles deep -- the line
+    // buffer's registered read, then fetch_en_d -- so next_digit is only
+    // complete two pixels after the second fetch, and cur_digit loads it at
+    // x_px == MARGIN_X - 1.  That silently required MARGIN_X >= 4.  It held
+    // against a 16 pixel left margin and does not against this glyph's 2, so
+    // the fetch moved to where every other spare cycle already lives.
     //
     // Fetching all 4 bytes instead is what this used to do: 64 flops of
     // digit registers rather than 16 plus the byte-lane and 8-way nibble
@@ -157,7 +205,13 @@ module multi_seg_monitor (
     // and one that can free-run at a fixed rate (SPEC.md section 4.3).
     wire [1:0] render_buf = row[1:0];
 
-    wire       fetch_en   = cell_x ? (cx < 2)     : (x_px < 2);
+    // x_px counts up through blanking and wraps 2047 -> 0, so &x_px[10:1] is
+    // exactly the two cycles before the first visible pixel, and x_px[0] still
+    // picks slot 0 then slot 1 across them.
+    wire       fetch_en   = cell_x ? (cx < 2)     : (&x_px[10:1]);
+    // col + 1 reaches COLS on the last digit of a row, which reads bytes
+    // 212..215 of the row buffer: never written, never displayed.  On the
+    // 64 column grid this wrapped the 6 bit field to 0 instead.
     wire [5:0] fetch_col  = cell_x ? (col + 1'b1) : 6'd0;
     wire       fetch_slot = cell_x ? cx[0]        : x_px[0];
     wire [2:0] fetch_seg  = fetch_slot ? slot1_seg : slot0_seg;
@@ -173,8 +227,8 @@ module multi_seg_monitor (
         fetch_hi_d   <= fetch_seg[0];
     end
 
-    // Reads take 2 of every 12 cycles to prefetch the next digit, so writes have
-    // the other 10 -- about 33 MB/s against the 606 kB/s a source actually needs.
+    // Reads take 2 of every 15 cycles to prefetch the next digit, so writes have
+    // the other 13 -- about 34 MB/s against the 365 kB/s a source actually needs.
     // Reads always win, which is what keeps the one-access-per-cycle guarantee
     // the memory wrapper depends on (SPEC.md section 8.1).
     wire lb_re    = fetch_en;
@@ -200,7 +254,7 @@ module multi_seg_monitor (
     // ------------------------------------------------------------------
     // Internal generator
     //
-    // Draws a moving zone plate (zoneplate.v) into every one of the 2368
+    // Draws a moving zone plate (zoneplate.v) into every one of the 1431
     // digits, with no external data: the picture a bare board shows, and the
     // silicon bring-up safety net. It replaced a scrolling hex test pattern;
     // the zone plate still sweeps all 15 lit codes across the screen, but the
@@ -209,7 +263,7 @@ module multi_seg_monitor (
     // Row N+1 is built while row N is on screen, into the buffer half that is not
     // being read. Each byte waits for the zone plate to compute it (~12 cycles)
     // and is then written in whatever cycle the renderer isn't reading, so a
-    // row's 256 bytes are placed long before that row is needed.
+    // row's 212 bytes are placed long before that row is needed.
     // ------------------------------------------------------------------
     reg [5:0]  gen_row;
     reg [7:0]  gen_ptr;

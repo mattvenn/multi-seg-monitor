@@ -9,9 +9,11 @@ An ASIC does the VGA signal generation, using the Tiny Tapeout standard.
 
 The RP2350 on the demoboard interfaces with the ASIC to send data.
 
-A 64 x 37 grid of digits — 2368 digits, 18944 segments — each segment with its own
-4 bit brightness. The chip holds no framebuffer: it races the beam, keeping only the
-digit row it is currently drawing. See [SPEC.md](SPEC.md) for the full design and the
+A 53 x 27 grid of digits — 1431 digits, 11448 segments — each segment with its own
+4 bit brightness, in a fat 15x22 cell. The chip holds no framebuffer: it races the
+beam, keeping only the digit row it is currently drawing. `python3 tools/shapes.py`
+prints the glyph, the grid and the byte rate it implies; `main` carries a smaller
+digit on a 64x37 grid. See [SPEC.md](SPEC.md) for the full design and the
 reasoning behind it, and [resolution_discussion.md](resolution_discussion.md) section
 11-12 for why the resolution moved from SPEC.md's original 640x480@72 to 800x600@60.
 
@@ -78,7 +80,7 @@ Needs [oss-cad-suite](https://github.com/YosysHQ/oss-cad-suite-build) on the pat
 
     make bitstream            # synth + place & route + pack, for the TT FPGA breakout
     make test                 # cocotb tests + converter tests
-    make -C test delay-sweep  # vsync latency sweep, ~9 min, writes frame_delay_*.png
+    make -C test delay-sweep  # vsync latency sweep, ~12 min, writes frame_delay_*.png
     make -C test gold         # rewrite the gold images after an intended change
 
 `make bitstream` mirrors `tt_fpga.py harden` so it runs without the tt-support-tools
@@ -193,7 +195,7 @@ a packet or the manual switch turns cycling off. A valid header also hands the
 builds one from Python, and `tools/palette_builder` exports the exact bytes.
 
 **1. Internal generator, no firmware.** Leave `uio[7]` low and the design ignores the
-stream port entirely. You should get a zone plate drawn across the 64x37 grid:
+stream port entirely. You should get a zone plate drawn across the 53x27 grid:
 concentric rings that tighten outward and flow slowly, with the palette changing
 every ~17 s through a fade to black. Compare against `test/gold/generator.png`,
 which is the same thing from simulation, a few frames after reset.
@@ -228,23 +230,30 @@ This is the failure the hardware run actually produced, and it is worth recognis
 on sight because the cause is not where it appears to be.
 
 Each digit row is drawn from a line buffer the host is still filling. The renderer
-re-reads the whole 256 byte row on every one of its 16 scanlines — 1056 clocks — while
-the host takes 16896 to fill it, so the host has to be a **full row ahead**. It builds
+re-reads the whole 212 byte row on every one of its 22 scanlines — 1056 clocks — while
+the host takes 23232 to fill it, so the host has to be about a **row ahead**. It builds
 that lead during vertical blanking, 713 µs, and anything spent before the first byte
 comes straight off it.
 
+Vertical blanking is a fixed 28512 clocks whatever the cell, so this glyph's taller
+row means it is worth 1.23 digit rows of lead where the 16-scanline row on `main`
+got 1.69. The budget shrank with it.
+
 `make -C test delay-sweep` puts numbers on it by delaying the testbench host's first
-byte after vsync, 0 to 1000 µs, and writing a frame for each:
+byte after vsync, 0 to 900 µs, and writing a frame for each:
 
 | Delay before first byte | Lead | Result |
 |---|---|---|
-| ≤ 400 µs | ≥ 190 bytes | clean |
-| 500 µs | 129 bytes | tears from column 52 |
-| 600 µs | 68 bytes | tears from column 36 |
-| 800 µs | -53 bytes | tears from column 4 |
+| ≤ 250 µs | ≥ 170 bytes | clean |
+| 300 µs | 151 bytes | tears from column 50 |
+| 400 µs | 115 bytes | tears from column 41 |
+| 500 µs | 78 bytes | tears from column 31 |
+| 600 µs | 41 bytes | tears from column 22 |
+| 800 µs | -32 bytes | tears from column 3 |
 
-So the budget from vsync to the first byte is **about 450 µs**, and what blew it was
-the *dispatch*, not the handler body.
+So the budget from vsync to the first byte is **about 250 µs** on this glyph, against
+about 450 on `main`. What blew it on hardware was the *dispatch*, not the handler
+body.
 
 `Pin.irq` defaults to a soft IRQ, which does not run in the interrupt at all — it
 waits for `micropython.schedule()` to reach a bytecode boundary, and `service()`
@@ -271,27 +280,30 @@ the DMA trigger outright — no strobe and no data at all.
 
 If it ever tears again, measure from vsync falling to the first strobe before
 changing anything. Interrupt latency itself is under 10 µs on this platform, so it is
-not a plausible cause on its own.
+not a plausible cause on its own — but the 250 µs budget leaves a lot less room above
+it than the old 450 did, so measure rather than assume.
 
 The signature, if you want to confirm the diagnosis rather than infer it: the tear
-starts at column ≈ lead/4 + 2.5 and walks right as the row is drawn, so digits show
-one frame in their top half and another in their bottom. The stale content is digit
-row **R−4**, four buffers back — on a still image that reads as a piece of the picture
-from elsewhere, not as a repeat.
+starts partway across the row — further left the further behind the host is, see the
+table — and walks right as the row is drawn, so digits show one frame in their top
+half and another in their bottom. The stale content is digit row **R−4**, four buffers
+back — on a still image that reads as a piece of the picture from elsewhere, not as a
+repeat.
 
 # Playing video
 
-    tools/video2seg.py clip.mp4 video.seg --fps 24    # 9472 bytes per frame
+    tools/video2seg.py clip.mp4 video.seg --fps 24    # 5724 bytes per frame
     tools/seg2png.py video.seg preview.png --frame 30 # check it before deploying
 
-Each of the 18944 segments averages the source pixels its own rectangle covers, in
+Each of the 11448 segments averages the source pixels its own rectangle covers, in
 linear light — one sample per digit would throw away most of the resolution that
 per-segment brightness exists to provide.
 
-Copy the `.seg` file and `firmware/seg_player.py` to the demoboard. Frames grew 52%
-over the 640x480 mode's 6240 bytes (`resolution_discussion.md` §11), so the same 4 MB
-flash now holds about 17 seconds at 24 fps rather than 26 — existing `.seg` files
-predate the frame size change and need regenerating, not reusing.
+Copy the `.seg` file and `firmware/seg_player.py` to the demoboard. A frame is 5724
+bytes at this glyph — fewer, bigger digits — against 9472 for the 64x37 grid and 6240
+for the old 640x480 mode (`resolution_discussion.md` §11), so the same 4 MB flash
+holds about 30 seconds at 24 fps. Any `.seg` file made for another grid is the wrong
+size and needs regenerating, not reusing.
 
 ### Choosing the Pmod and palette
 
@@ -319,9 +331,11 @@ Or edit the `main()` call at the bottom of the file and keep using `mpremote run
 config packet after reset, before any pixels (see "Config packet" above).
 
 The chip has no framebuffer, so the player re-pushes every displayed frame at 60.3 Hz
-(≈571 kB/s) regardless of the video's own rate. Pacing is free: a digit row is 16
-scanlines and 256 bytes, so one byte every 66 pixel clocks tracks the raster exactly,
-with no remainder to accumulate.
+(≈345 kB/s) regardless of the video's own rate. Pacing is nearly free: a digit row is
+22 scanlines and 212 bytes, so one byte every 22 x 1056 / 212 = 109.58 pixel clocks
+tracks the raster. That is not a whole number the way `main`'s 66 was, and it doesn't
+need to be — the PIO divider is 16.8 fixed point and both ends restart on vsync, so
+the remainder never accumulates.
 
 # Inspiration
 

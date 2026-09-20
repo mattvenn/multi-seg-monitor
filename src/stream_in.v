@@ -123,11 +123,17 @@ module stream_in #(
     // Both halves of waddr must stay inside the row this instance is
     // configured for, or the wrap logic (s_byte == ROW_BYTES-1,
     // s_row == ROWS-1) has an off-by-one.
+    //
+    // Both are gated on f_reset_done for the same reason: an 8 bit s_byte can
+    // power up at anything, and at ROW_BYTES 212 -- the fat glyph's 53
+    // columns -- "anything" includes 212..255.  Only the count after a real
+    // reset is claimed.  At 256 bytes a row this bound was trivially true of
+    // any 8 bit value and the gate wasn't needed, which is the same way
+    // s_row's wrap comparison was dead code while s_row was 5 bits.
     always @(posedge clk)
-        if (rst_n) begin
+        if (rst_n && f_reset_done) begin
             assert (s_byte < ROW_BYTES);
-            if (f_reset_done)
-                assert (s_row < ROWS);
+            assert (s_row < ROWS);
         end
 
     // Data integrity, under the documented host discipline (CLAUDE.md

@@ -36,7 +36,15 @@ import segments
 
 WIDTH, HEIGHT = 800, 600
 COLS, ROWS = segments.COLS, segments.ROWS
-GRID_W, GRID_H = segments.GRID_W, segments.GRID_H  # 768 x 592
+GRID_W, GRID_H = segments.GRID_W, segments.GRID_H  # 795 x 594
+
+# The range the zone plate's two source points roam, which is *not* the grid.
+# src/zoneplate.v scales the triangle by * 3 >> 3 and * 37 >> 7 -- 768 >> 11
+# and 592 >> 11 -- because those are two adders where 795 and 594 would be
+# multipliers on the longest arithmetic path in the design.  Sources that stop
+# short of two edges is invisible in a field of rings; a model that followed
+# the grid instead would stop being bit-exact.
+SRC_W, SRC_H = 768, 592
 
 # Segment centres within a cell (integer, rounded down, like the RTL would).
 SEG_CX = [(s[1] + s[2]) // 2 for s in segments.SEGMENTS]
@@ -229,10 +237,10 @@ def _sources(frame, drift):
     """Two points wandering on triangle-wave Lissajous paths. `drift` 4 takes
     about a minute to cross the screen; the four rates are 6:4:4:5 so the pair
     never falls into step."""
-    ax = tri((frame * drift * 6) >> 4, 12) * GRID_W >> 11
-    ay = tri(((frame * drift * 4) >> 4) + 600, 12) * GRID_H >> 11
-    bx = tri(((frame * drift * 4) >> 4) + 1400, 12) * GRID_W >> 11
-    by = tri((frame * drift * 5) >> 4, 12) * GRID_H >> 11
+    ax = tri((frame * drift * 6) >> 4, 12) * SRC_W >> 11
+    ay = tri(((frame * drift * 4) >> 4) + 600, 12) * SRC_H >> 11
+    bx = tri(((frame * drift * 4) >> 4) + 1400, 12) * SRC_W >> 11
+    by = tri((frame * drift * 5) >> 4, 12) * SRC_H >> 11
     return ax, ay, bx, by
 
 

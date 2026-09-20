@@ -23,7 +23,7 @@ set -e
 here=$(cd "$(dirname "$0")" && pwd)
 out="$here/../test"
 
-# 768x592 is the grid, not the screen: 64 columns of 12 px by 37 rows of 16.
+# 795x594 is the grid, not the screen: 53 columns of 15 px by 27 rows of 22.
 # video2seg.py wants exactly that, one source pixel per display pixel.
 #
 # Everything is written as a target segment intensity 0-15 and then encoded as
@@ -34,11 +34,13 @@ out="$here/../test"
 # so most of the frame could not show tearing at all.  The fade also stops at
 # 30% rather than reaching zero, for the same reason.
 #
-# Coordinates are the original 624x480 card's, scaled by 768/624 (X) and
-# 592/480 (Y) so the same shapes -- circle, bottom bar, black rectangle, 8
-# vertical bars -- land in the same relative place on the bigger grid.
-ffmpeg -y -v error -f lavfi -i color=c=black:s=768x592 -frames:v 1 -vf \
-    "format=gray,geq=lum='if(gt(X\,615)*between(Y\,74\,370), 0, 255*pow(if(between(Y\,493\,543), 13, if(lt(hypot(X-369\,Y-222)\,117), 15, (floor(X/96)+1)*1.875*(1-0.7*Y/592)))/15\, 1/2.2))'" \
+# Coordinates are the original 624x480 card's, scaled to the grid so the same
+# shapes -- circle, bottom bar, black rectangle, 8 vertical bars -- land in the
+# same relative place whatever the glyph makes the grid.  The bars are
+# floor(X*8/795) rather than a fixed column width, since 795 doesn't divide by
+# 8 and a ninth sliver of a bar at the right edge is not what the card is for.
+ffmpeg -y -v error -f lavfi -i color=c=black:s=795x594 -frames:v 1 -vf \
+    "format=gray,geq=lum='if(gt(X\,637)*between(Y\,74\,371), 0, 255*pow(if(between(Y\,495\,545), 13, if(lt(hypot(X-382\,Y-223)\,121), 15, (floor(X*8/795)+1)*1.875*(1-0.7*Y/594)))/15\, 1/2.2))'" \
     "$out/testcard.png"
 
 cd "$here"

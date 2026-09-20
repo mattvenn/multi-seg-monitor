@@ -58,15 +58,19 @@ MODE = 32  # uio[7]       -> 1 selects streamed data
 VSYNC_DIGILENT = 30  # uio[5]   -> Digilent PmodVGA vsync
 VSYNC_TINYVGA = 36  # uo_out[3] -> Tiny VGA vsync
 
-# Display constants -- must match
-# docs/superpowers/specs/2026-08-11-800x600-mode-design.md
-COLS, ROWS = 64, 37
-CELL_H = 16
+# Display constants -- must match tools/segments.py, which mirrors the RTL.
+COLS, ROWS = 53, 27
+CELL_H = 22
 H_TOTAL = 1056
-ROW_BYTES = COLS * 4  # 256
-FRAME_BYTES = ROWS * ROW_BYTES  # 9472
+ROW_BYTES = COLS * 4  # 212
+FRAME_BYTES = ROWS * ROW_BYTES  # 5724
 
-CLOCKS_PER_BYTE = CELL_H * H_TOTAL // ROW_BYTES  # 66, exactly
+# A float, not a floor: 22 * 1056 / 212 is 5808/53, about 109.58, where the
+# old 12x16 cell came to exactly 66. The remainder never accumulates -- the
+# PIO divider is 16.8 fixed point and both ends restart on vsync -- but
+# flooring it here would send about half a percent fast all frame, which is
+# half a digit row of drift by the bottom of the screen.
+CLOCKS_PER_BYTE = CELL_H * H_TOTAL / ROW_BYTES
 PIXEL_HZ = 40_000_000  # required VGA pixel clock, 800x600@60
 
 PIO0_TXF0 = 0x50200010  # PIO0 TX FIFO 0
@@ -158,7 +162,7 @@ class Player:
         # RP2350's own system clock to whatever divides most cleanly to the
         # target (ttboard/demoboard.py _get_best_rp2040_freq), so the real
         # divisor from sysclk to pixel clock isn't guaranteed in advance.
-        pio_freq = pixel_hz // (CLOCKS_PER_BYTE // 2)
+        pio_freq = round(pixel_hz * 2 / CLOCKS_PER_BYTE)
         self.sm = rp2.StateMachine(
             0,
             push_bytes,

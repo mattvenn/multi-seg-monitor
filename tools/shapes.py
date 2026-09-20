@@ -4,13 +4,13 @@ The 7 segment cell as six numbers, for trying other proportions.
 
 The chip draws one digit and one only: the segment rectangles in
 src/multi_seg_monitor.v, mirrored on the software side by SEGMENTS in
-tools/segments.py, in a 12x16 cell on a 64x37 grid.  NOTHING HERE IS IN THE
+tools/segments.py, in a 15x22 cell on a 53x27 grid.  NOTHING HERE IS IN THE
 RTL.  digit() builds that same digit from a thickness and a length for each
 orientation plus the distance to the next digit, and lets the cell and the
 grid follow, so the proportions can be pushed around and looked at under the
 zone plate (the Digit tab of tools/palette_builder) before anyone touches
 Verilog.  At the default parameters it reproduces segments.SEGMENTS rectangle
-for rectangle, on the same 64x37 grid, and test_palette_builder.py says so --
+for rectangle, on the same 53x27 grid, and test_palette_builder.py says so --
 the chip's geometry is still written down twice, not three times.
 
 A segment's thickness is across it, so which axis that is depends on which way
@@ -42,8 +42,8 @@ has to feed them, so grid() reports that too:
   * cols stops at 64 because the line buffer holds four rows of 256 bytes in
     1 kB and a digit is 4 bytes; a wider grid than that has nowhere to live.
   * the host has to send a byte every cell_h * 1056 / (cols * 4) pixel clocks
-    -- 66 exactly for the chip's own cell, and whatever it comes to for
-    another. It does not have to be a whole number: the RP2350 clocks the
+    -- 5808/53, about 109.58, for the chip's own cell, and whatever it comes
+    to for another. It does not have to be a whole number: the RP2350 clocks the
     strobe from PIO, whose divider is 16.8 fixed point, and both ends realign
     on vsync every frame, so a fractional period neither accumulates nor
     needs tracking. What the host must do is stay inside the line buffer's
@@ -95,13 +95,13 @@ BYTES_PER_DIGIT = segments.BYTES_PER_DIGIT
 
 # Slider name, range, default, help -- the same shape as attract_proto.PARAMS,
 # so the builder can build the sliders from it.  The defaults are the chip's
-# own geometry.  All six are independent now that the cell follows them; the
-# maxima are where the grid stops being a grid (the widest cell here leaves 14
-# columns, the tallest 8 rows).
+# own geometry: the fat 13x20 body in a 15x22 cell.  All six are independent
+# now that the cell follows them; the maxima are where the grid stops being a
+# grid (the widest cell here leaves 14 columns, the tallest 8 rows).
 PARAMS = [
-    ("thick_h", 1, 8, 2, "thickness of the horizontal bars a, g, d -- in y, across them"),
-    ("len_h", 1, 24, 6, "length of those bars, in x"),
-    ("thick_v", 1, 8, 2, "thickness of the vertical rails b, c, e, f -- in x, across them"),
+    ("thick_h", 1, 8, 4, "thickness of the horizontal bars a, g, d -- in y, across them"),
+    ("len_h", 1, 24, 5, "length of those bars, in x"),
+    ("thick_v", 1, 8, 4, "thickness of the vertical rails b, c, e, f -- in x, across them"),
     ("len_v", 1, 16, 4, "length of those rails, in y"),
     ("gap_x", 0, 16, 2, "columns between one digit's ink and the next one's, across"),
     ("gap_y", 0, 16, 2, "rows between one digit's ink and the next one's, down"),
@@ -308,12 +308,11 @@ def warnings(shape):
             "gap_y is 0: a bottom bar touches the top bar of the row below, so the rows "
             "run together"
         )
-    if shape.cell_h & (shape.cell_h - 1):
-        msgs.append(
-            f"cell_h {shape.cell_h} is not a power of two, so the renderer would need a row "
-            "counter rather than a slice of y (cy = y_rel[3:0], row = y_rel[9:4] today) -- a "
-            "few gates, the same shape as the column counter it already has for a 12-wide cell"
-        )
+    # A cell_h that isn't a power of two used to be listed here: the renderer
+    # sliced cy and row straight out of y_px, which only worked at 16.  It
+    # doesn't any more -- src/multi_seg_monitor.v counts both, because the
+    # chip's own cell is 22 tall -- so every height costs the same now and
+    # there is nothing left to warn about.
     return msgs
 
 
