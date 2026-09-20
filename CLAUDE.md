@@ -37,7 +37,8 @@ override with `TT_TOOLS=`.
     make -C test IHP_SRAM=1         # same suite against the IHP macro instead of an inferred array
     make -C test delay-sweep        # vsync latency sweep, ~5 min under icarus, writes frame_delay_*.png
     make -C test gold               # rewrite the gold images after an intended change
-    tools/palette_builder/palette_builder.py              # design palettes (needs Tk + numpy)
+    tools/palette_builder/palette_builder.py              # design palettes and try cell shapes (Tk + numpy)
+    python3 tools/shapes.py                               # the digit's proportions, checked and drawn
     tools/palette_builder/palette_builder.py --write-rtl  # regenerate src/palette_presets.v
     git config core.hooksPath .githooks                   # once per clone: enables the pre-commit hook
 
@@ -168,6 +169,38 @@ curve.
 rectangles and the nibble ordering. If one changes the other must too, or the
 round-trip test will say so. Nibble order within a digit word is fixed
 low-to-high as `a, b, c, d, e, f, g, DP` — host software depends on it.
+
+`tools/shapes.py` is *not* a third copy: it builds the same digit from a
+thickness and a length for each orientation plus the gap to the next digit,
+lets the cell and the grid follow those six numbers, and exists for trying
+other proportions under the zone plate in the palette builder's Digit tab
+before anyone touches Verilog. The RTL has exactly one set of rectangles on
+one 64x37 grid, and `shapes.CHIP` — the sliders at their defaults —
+reproduces `segments.SEGMENTS` rectangle for rectangle, on the same grid with
+the same margins (the test says so).
+
+Because the cell is a result rather than a constant there, a variant changes
+more than the glyph: `cols` stops at 64 (the line buffer holds four rows at a
+256-byte stride, and `fetch_col` is 6 bits), `rows` is whatever fits in 600,
+and the host sends a byte every `cell_h * 1056 / (cols * 4)` pixel clocks. The
+tab reports all three. That period need **not** be a whole number — the chip's
+66 is, but the RP2350 clocks the strobe from a PIO divider (16.8 fixed point)
+and both ends realign on vsync, so a fractional period neither accumulates nor
+needs tracking; what the host must do is start inside the line buffer's
+window, one to three rows ahead. The 64-column wall is the only hard limit on
+a glyph; a `cell_h` that isn't a power of two costs a row counter in place of
+`row = y_rel[9:4]`, which `warnings()` mentions because it is a real cost, not
+because it is a reason not to.
+
+`validate()` is the separate question of whether a variant could be built at
+all: the prefetch fetches two nibbles per digit per scanline, so no scanline
+may carry more than two segments, and where one carries two they must be
+separated by a single `cx` predicate shared by every row — the slot select is
+not per-band. The 7-segment topology holds that at any proportions, so
+`validate()` mostly hands back what the RTL would need (the predicate, and the
+`cy → (slot0, slot1)` band table). It finds the predicate by 2-colouring the
+segments rather than searching every mask, since with the cell free `2^cell_w`
+is no longer a number worth enumerating.
 
 ### Pinout
 

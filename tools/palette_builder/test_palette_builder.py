@@ -17,6 +17,7 @@ import sys
 import tempfile
 
 import numpy as np
+from fractions import Fraction
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # tools/ (for segments / png / seg2png) goes in first so HERE ends up ahead of it:
@@ -343,6 +344,354 @@ def test_chip_effect_drives_its_own_palette():
     # Every preset the effect can name must be one the chip really has.
     for n in range(8):
         pb.palette_to_lut(segments.curve_palette(segments.PRESET_PARAMS[n]), 12)
+
+
+# --------------------------------------------------------------------------
+# Digit proportions (tools/shapes.py).  Nothing here is in the RTL -- the chip
+# has one set of segment rectangles on one 64x37 grid -- so what these guard
+# is that a variant is buildable at all, that the cell and the grid really
+# follow the sliders, that the builder draws what it is asked for, and that
+# the defaults are still the chip's own geometry.
+# --------------------------------------------------------------------------
+
+
+def _sample_params(rng, n):
+    """`n` random settings, plus each slider at both ends with the rest at the
+    chip's values.  Every combination is drawable now that the cell follows
+    the numbers, so this is a sample for cost, not a filter."""
+    import shapes
+
+    out = [dict(shapes.DEFAULTS)]
+    for _ in range(n):
+        out.append({key: rng.randint(lo, hi) for key, lo, hi, _d, _h in shapes.PARAMS})
+    for key, lo, hi, _d, _h in shapes.PARAMS:
+        for v in (lo, hi):
+            out.append(dict(shapes.DEFAULTS, **{key: v}))
+    return out
+
+
+def test_every_setting_is_one_the_prefetch_can_draw():
+    """validate() is the hardware's rules, not a style check: two nibbles per
+    scanline, split by one cx predicate shared by every row. The 7 segment
+    topology holds them at any proportions, so this says so at a few dozen --
+    and says it by checking the bands, which is what the RTL would encode."""
+    import shapes
+
+    rng = random.Random(11)
+    names = [n for n, *_ in segments.SEGMENTS]
+    for params in _sample_params(rng, 40):
+        cell = shapes.digit(**params)
+        mask, bands = shapes.validate(cell)
+        own = cell.owner()  # raises on an overlap or a rectangle outside the cell
+        assert bands[0][0] == 0 and bands[-1][1] == cell.cell_h - 1, (params, bands)
+        for a, b in zip(bands, bands[1:]):
+            assert b[0] == a[1] + 1, (params, bands)
+        # Every pixel must read the slot its own segment was fetched into, or
+        # the renderer shows the other nibble for part of the row.
+        for y0, y1, s0, s1 in bands:
+            for cy in range(y0, y1 + 1):
+                for cx in range(cell.cell_w):
+                    seg = own.get((cx, cy))
+                    if seg is not None:
+                        assert seg == (s1 if (mask >> cx) & 1 else s0), (params, cx, cy)
+        # ...and the bands are the classic five, whatever the proportions.
+        # Unordered: which of a pair lands in slot 1 is the predicate's
+        # choice, and on a narrow body the cheapest predicate is the one that
+        # names the left rail rather than the right.
+        lit = {frozenset((names[s0], names[s1])) for _y0, _y1, s0, s1 in bands if s0 is not None}
+        want = {frozenset(p) for p in (("a",), ("f", "b"), ("g",), ("e", "c"),
+                                       ("d", "DP") if len(cell) == 8 else ("d",))}
+        assert lit == want, (params, lit)
+        # One sample point each, or two nibbles would track the same level.
+        pts = [cell.sample(s) for s in range(len(cell)) if not cell.is_dark(s)]
+        assert len(set(pts)) == len(pts), (params, pts)
+        for ox, oy in pts:
+            assert 0 <= ox < cell.cell_w and 0 <= oy < cell.cell_h, params
+
+
+def test_no_slider_position_is_one_the_cell_cannot_hold():
+    """The complaint that started this: settings that didn't work. Now that
+    the cell follows the numbers, every position of every slider has to be a
+    digit -- each one swept over its whole range, from the chip's settings and
+    from a few random ones."""
+    import shapes
+
+    rng = random.Random(12)
+    starts = [dict(shapes.DEFAULTS)] + [
+        {key: rng.randint(lo, hi) for key, lo, hi, _d, _h in shapes.PARAMS} for _ in range(5)
+    ]
+    for start in starts:
+        for key, lo, hi, _d, _h in shapes.PARAMS:
+            for v in range(lo, hi + 1):
+                cell = shapes.digit(**dict(start, **{key: v}))
+                assert cell.params[key] == v, (start, key, v)
+                assert cell.cols >= 1 and cell.rows >= 1, (start, key, v)
+                assert cell.cols * cell.cell_w <= shapes.SCREEN_W
+                assert cell.rows * cell.cell_h <= shapes.SCREEN_H
+                shapes.validate(cell)
+
+
+def test_a_parameter_off_its_slider_is_refused():
+    import shapes
+
+    for params in (dict(thick_h=0), dict(len_h=99), dict(gap_x=-1), dict(nonsense=1)):
+        try:
+            shapes.digit(**params)
+        except ValueError:
+            continue
+        raise AssertionError(f"{params} was accepted, but it is off the slider")
+
+
+def test_the_cell_and_the_grid_follow_the_settings():
+    """The cell is the body plus the gap, and the grid is what fits on screen
+    -- which is why these sliders change how many digits there are and how
+    fast the host has to feed them, not just how one looks."""
+    import shapes
+
+    rng = random.Random(13)
+    for params in _sample_params(rng, 30):
+        cell = shapes.digit(**params)
+        assert cell.w == 2 * params["thick_v"] + params["len_h"], params
+        assert cell.h == 3 * params["thick_h"] + 2 * params["len_v"], params
+        assert (cell.cell_w, cell.cell_h) == (cell.w + params["gap_x"], cell.h + params["gap_y"])
+        assert cell.cols == max(1, min(shapes.MAX_COLS, shapes.SCREEN_W // cell.cell_w)), params
+        assert cell.rows == max(1, shapes.SCREEN_H // cell.cell_h), params
+        assert cell.margin_x == (shapes.SCREEN_W - cell.cols * cell.cell_w) // 2
+        assert cell.margin_y == (shapes.SCREEN_H - cell.rows * cell.cell_h) // 2
+        assert cell.row_bytes == cell.cols * 4 and cell.row_bytes <= 256  # the line buffer's wall
+        assert cell.frame_bytes == cell.rows * cell.cols * 4
+        assert cell.clocks_per_byte == Fraction(cell.cell_h * 1056, cell.row_bytes)
+
+    # The chip's own numbers, which are where all of those came from.
+    chip = shapes.CHIP
+    assert (chip.cell_w, chip.cell_h) == (segments.CELL_W, segments.CELL_H)
+    assert (chip.cols, chip.rows) == (segments.COLS, segments.ROWS)
+    assert (chip.margin_x, chip.margin_y) == (segments.MARGIN_X, segments.MARGIN_Y)
+    assert chip.frame_bytes == segments.FRAME_BYTES
+    assert chip.clocks_per_byte == 66  # the pacing invariant, exact
+    assert shapes.warnings(chip) == []
+
+
+def test_the_gaps_are_the_distance_between_digits():
+    """gap_x and gap_y are what a person looks at -- how far apart the digits
+    sit -- so measure them where it counts: dark pixels between one digit's
+    ink and the next one's, on a frame with every segment lit."""
+    import shapes
+
+    rng = random.Random(14)
+    for params in _sample_params(rng, 8):
+        cell = shapes.digit(**params)
+        # Every nibble lit except the decimal point, which sits in the gap.
+        frame = bytearray(b"\xff" * cell.frame_bytes)
+        for digit in range(cell.digits):
+            frame[digit * 4 + 3] = 0x0F  # byte 3 is {DP, g}: keep g, drop DP
+        idx = pb.index_image_from_frame(bytes(frame), cell)
+        if cell.cols < 3 or cell.rows < 3:
+            continue
+        # A horizontal cut through the upper rails, a vertical one through the
+        # left rail: both cross every cell.
+        x0 = cell.margin_x + cell.cell_w
+        y0 = cell.margin_y + cell.cell_h
+        # Across a rail: rail, the bars' width of nothing, rail, then the gap.
+        row_cut = idx[y0 + cell.sample(5)[1], x0 : x0 + cell.cell_w]
+        assert int((row_cut == 0).sum()) == params["len_h"] + params["gap_x"], \
+            (params, list(row_cut))
+        # Down the bars: bar, rail height of nothing, bar, likewise, bar, gap.
+        col_cut = idx[y0 : y0 + cell.cell_h, x0 + cell.sample(0)[0]]
+        assert int((col_cut == 0).sum()) == 2 * params["len_v"] + params["gap_y"], \
+            (params, list(col_cut))
+        # ...and specifically, the dark run between this digit's ink and the
+        # next one's is the gap, in both directions. That is what the slider
+        # means, and it is measured here on the pixels rather than on the
+        # arithmetic that produced them.
+        across = idx[y0 + cell.sample(1)[1], x0 + cell.w : x0 + cell.cell_w]
+        down = idx[y0 + cell.h : y0 + cell.cell_h, x0 + cell.sample(0)[0]]
+        assert len(across) == params["gap_x"] and not across.any(), (params, list(across))
+        assert len(down) == params["gap_y"] and not down.any(), (params, list(down))
+
+
+def test_the_predicate_is_the_one_a_brute_force_search_would_find():
+    """_predicate() 2-colours the segments instead of searching every mask,
+    because the cell isn't 12 wide any more and 2^cell_w stopped being a
+    number one can enumerate. On the cells where it still is, the two have to
+    agree about what is legal."""
+    import shapes
+
+    rng = random.Random(15)
+    checked = 0
+    for params in _sample_params(rng, 30):
+        cell = shapes.digit(**params)
+        if cell.cell_w > 14:
+            continue
+        checked += 1
+        mask, _bands = shapes.validate(cell)
+        own = cell.owner()
+        rows = shapes._row_segments(own, cell.cell_h, cell.cell_w)
+        pairs = [(cy, sorted(segs)) for cy, segs in enumerate(rows) if len(segs) == 2]
+
+        def ok(m):
+            for cy, (a, b) in pairs:
+                ina = {(m >> cx) & 1 for cx in rows[cy][a]}
+                inb = {(m >> cx) & 1 for cx in rows[cy][b]}
+                if len(ina) > 1 or len(inb) > 1 or ina == inb:
+                    return False
+            return True
+
+        assert ok(mask), (params, bin(mask))
+        assert any(ok(m) for m in range(1 << cell.cell_w))  # sanity: the search agrees one exists
+    assert checked >= 5, checked
+
+
+def test_validate_rejects_a_cell_the_prefetch_could_not_draw():
+    """The 7 segment topology can't produce these, but validate() is what
+    would have to catch them if the layout were ever changed."""
+    import shapes
+
+    bad = {
+        "overlap": [(0, 5, 0, 5), (4, 8, 4, 8)],
+        # Three regions on one scanline, and the prefetch fetches two.
+        "three_on_a_row": [(0, 3, 6, 9), (4, 7, 6, 9), (8, 11, 6, 9)],
+        # Legal row by row, but the two rows want opposite predicates, and the
+        # slot select is shared by every row.
+        "no_one_predicate": [(0, 3, 0, 1), (4, 11, 0, 1), (0, 7, 4, 5), (8, 11, 4, 5)],
+        # A pair that shares a scanline *and* a column: no predicate can tell
+        # the two apart, whatever the cell size.
+        "same_columns": [(0, 3, 0, 1), (4, 7, 0, 1), (0, 3, 2, 3), (4, 7, 2, 3),
+                         (0, 7, 4, 5), (4, 7, 6, 7), (0, 3, 6, 7), (2, 5, 8, 9)],
+        "outside_the_cell": [(-1, 3, 0, 1)],
+        "too_many": [(0, 0, r, r) for r in range(9)],
+    }
+    for name, segs in bad.items():
+        try:
+            shapes.validate(shapes.Shape(segs))
+        except ValueError:
+            continue
+        raise AssertionError(f"validate() accepted {name}, which the prefetch cannot draw")
+
+
+def test_the_default_proportions_are_the_chips_own_geometry():
+    """shapes.CHIP has to be segments.SEGMENTS rectangle for rectangle, and
+    its sample points the table in src/zoneplate.v. If either drifts the
+    builder is previewing a digit the chip doesn't draw."""
+    import re
+
+    import attract_proto
+    import shapes
+
+    cell = shapes.CHIP
+    assert cell.params == shapes.DEFAULTS
+    assert len(cell) == 8
+    for seg, (name, x0, x1, y0, y1) in enumerate(segments.SEGMENTS):
+        assert cell.rect(seg) == (x0, x1, y0, y1), name
+        assert cell.pixels(3, 5, seg) == segments.segment_pixels(3, 5, seg), name
+        assert cell.sample(seg) == (attract_proto.SEG_CX[seg], attract_proto.SEG_CY[seg]), name
+    assert cell.is_dark(7) and not any(cell.is_dark(s) for s in range(7))  # DP
+
+    rtl = (Path(__file__).resolve().parents[2] / "src" / "zoneplate.v").read_text()
+    table = {int(n): (int(ox), int(oy)) for n, ox, oy in
+             re.findall(r"3'd(\d):\s+\{ox, oy\} = \{4'd(\d+), 4'd(\d+)\}", rtl)}
+    default = re.search(r"default: \{ox, oy\} = \{4'd(\d+), 4'd(\d+)\}", rtl)
+    table[6] = (int(default.group(1)), int(default.group(2)))  # g; 7 is never sampled
+    assert len(table) == 7, table
+    for seg, point in table.items():
+        assert cell.sample(seg) == point, (seg, point, cell.sample(seg))
+
+
+def test_warnings_name_the_costs_and_not_the_ratios():
+    """warnings() is for what a setting costs -- gaps that merge the grid, a
+    cell height the renderer can't slice -- and not for a byte period that
+    happens to be fractional. The host clocks the strobe from a PIO divider
+    and both ends realign on vsync, so a period like 5808/53 costs nothing;
+    saying otherwise would rule out most glyphs for no reason."""
+    import shapes
+
+    touching = shapes.digit(gap_x=0)
+    assert len(touching) == 7  # no gap column, so no decimal point
+    assert any("mesh" in m for m in shapes.warnings(touching))
+    assert any("nibble 7" in m for m in shapes.warnings(touching))
+    assert any("touches the next digit" in m for m in shapes.warnings(shapes.digit(gap_x=1)))
+    assert any("run together" in m for m in shapes.warnings(shapes.digit(gap_y=0)))
+
+    # A cell height that isn't a power of two: a real cost, and a small one.
+    odd = shapes.digit(gap_y=3)
+    assert odd.cell_h == 17
+    assert any("row counter" in m for m in shapes.warnings(odd))
+    assert not any("power of two" in m for m in shapes.warnings(shapes.digit(gap_y=2)))
+
+    # A fractional byte period is not a complaint, anywhere.
+    fractional = shapes.digit(thick_h=4, len_h=5, thick_v=4, len_v=4)
+    assert fractional.clocks_per_byte.denominator != 1
+    assert not any("whole number" in m or "drift" in m for m in shapes.warnings(fractional))
+    assert fractional.byte_rate > 0
+    # ...and the one wall that is real: the line buffer holds 64 digits a row.
+    assert fractional.cols <= shapes.MAX_COLS and fractional.row_bytes <= 256
+
+
+def test_index_image_draws_the_proportions_it_is_asked_for():
+    """Each nibble lands on its own segment's pixels, at any proportions, and
+    nothing lands anywhere else. The default stays byte-identical to what it
+    was before the sliders existed, which is what keeps the seg2png
+    cross-check and the gold images honest."""
+    import shapes
+
+    frame = _random_frame(4)
+    assert (pb.index_image_from_frame(frame, shapes.CHIP) == pb.index_image_from_frame(frame)).all()
+    rng = random.Random(16)
+    for params in _sample_params(rng, 6):
+        cell = shapes.digit(**params)
+        data = bytes(rng.randrange(256) for _ in range(cell.frame_bytes))
+        nibbles = np.frombuffer(data, dtype=np.uint8)
+        idx = pb.index_image_from_frame(data, cell)
+        spots = {(0, 0), (cell.cols - 1, cell.rows - 1), (cell.cols // 2, cell.rows // 2)}
+        for col, row in spots:
+            for seg in range(len(cell)):
+                byte = nibbles[(row * cell.cols + col) * 4 + seg // 2]
+                want = (byte >> 4) if seg % 2 else (byte & 0xF)
+                x0, x1, y0, y1 = cell.pixels(col, row, seg)
+                assert (idx[y0 : y1 + 1, x0 : x1 + 1] == want).all(), (params, col, row, seg)
+        lit = sum((x1 - x0 + 1) * (y1 - y0 + 1) for x0, x1, y0, y1 in cell.segs)
+        mask, _ = pb._segment_tables(cell)
+        assert len(mask) == lit * cell.digits, params
+
+
+def test_a_frame_for_another_grid_is_refused_rather_than_drawn_as_noise():
+    import shapes
+
+    wide = shapes.digit(gap_x=8, gap_y=8)
+    assert wide.frame_bytes != segments.FRAME_BYTES
+    try:
+        pb.index_image_from_frame(_random_frame(5), wide)
+    except ValueError as e:
+        assert "bytes" in str(e), e
+        return
+    raise AssertionError("a chip-sized frame was accepted for a different grid")
+
+
+def test_effect_index_image_follows_the_sample_points():
+    """The level a segment shows is the effect at that segment's sample point
+    -- the one pixel of it the zone plate decides -- and the decimal point
+    stays dark whether or not the cell has room for one."""
+    import attract_proto
+    import shapes
+
+    rng = random.Random(7)
+    params = attract_proto.default_params("zoneplate")
+    frame = 137
+    f = attract_proto.EFFECTS["zoneplate"](frame, **params)
+    for proportions in _sample_params(rng, 4):
+        cell = shapes.digit(**proportions)
+        idx = pb.index_image_from_effect("zoneplate", frame, params, shape=cell)
+        for _ in range(60):
+            col, row = rng.randrange(cell.cols), rng.randrange(cell.rows)
+            seg = rng.randrange(len(cell))
+            ox, oy = cell.sample(seg)
+            want = 0 if cell.is_dark(seg) else f(col * cell.cell_w + ox, row * cell.cell_h + oy)
+            x0, x1, y0, y1 = cell.pixels(col, row, seg)
+            assert (idx[y0 : y1 + 1, x0 : x1 + 1] == want).all(), (proportions, col, row, seg)
+        mask, _ = pb._segment_tables(cell)
+        off = np.ones(pb.HEIGHT * pb.WIDTH, dtype=bool)
+        off[mask] = False
+        assert not idx.ravel()[off].any(), f"{proportions} lit a background pixel"
 
 
 if __name__ == "__main__":

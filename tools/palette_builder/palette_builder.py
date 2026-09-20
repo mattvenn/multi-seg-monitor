@@ -22,11 +22,24 @@ Effects come from tools/attract_proto.py (plasma, zone plate, interference, and
 four DIP switch fields, and it colours itself from ui_in[3:1] rather than from
 the curve being edited).
 
-The left column has two tabs, Colour (the palette curves) and Pattern (the
-effect and its own tuning sliders, rebuilt when you switch effect); both act
-on the one preview. Play runs an effect at the chip's real 60 fps. The
-parameter line under the sliders is the matching attract_proto.py
-command-line, to reproduce a setting or carry it into RTL.
+The left column has three tabs, Colour (the palette curves), Pattern (the
+effect and its own tuning sliders, rebuilt when you switch effect) and Digit
+(the segment proportions themselves); all three act on the one preview. Play
+runs an effect at the chip's real 60 fps. The parameter line under the sliders
+is the matching attract_proto.py command-line, to reproduce a setting or carry
+it into RTL.
+
+The Digit tab is for a question the chip has not answered: its segment
+rectangles are one set of proportions, and on a big screen the grid can read
+as a tiling rather than as digits. The sliders are a thickness and a length
+for each orientation plus the gap to the next digit, and the cell and the grid
+follow them (tools/shapes.py) -- so a variant changes how many digits there
+are and how fast the host has to feed them, which the tab reports alongside
+the hardware's own rules. Only the chip's own proportions can be shown on the
+Generator and Droplet sources -- a capture and a .seg file are both bytes for
+the chip's 64x37 grid -- so a variant is judged under an effect, which is
+computed rather than stored, and is what it would have to look good in
+anyway.
 
 What it writes:
   - palettes/<name>.json: your own curves (Save / Open). Old 16-entry table
@@ -63,6 +76,7 @@ sys.path.insert(0, str(HERE.parent))  # tools/, for segments and png
 import attract_proto  # noqa: E402
 import png  # noqa: E402
 import segments  # noqa: E402
+import shapes  # noqa: E402
 
 WIDTH, HEIGHT = 800, 600
 GENERATOR_PNG = REPO / "test" / "gold" / "generator.png"
@@ -77,30 +91,44 @@ CHANNELS = "rgb"
 # a 16-entry lookup over it and stays fast enough to drag a slider.
 # --------------------------------------------------------------------------
 
-_SEG_MASK = None  # flat pixel indices covered by any segment
-_SEG_NIBBLE = None  # which nibble of the frame each of those pixels reads
+# (flat pixel indices covered by any segment, the nibble each one reads), keyed
+# by a cell's rectangles: the segment proportions are a live choice now, so the
+# tables can't be one pair of globals.
+_SEG_TABLES = {}
 
 
-def _segment_tables():
-    global _SEG_MASK, _SEG_NIBBLE
-    if _SEG_MASK is None:
+def _segment_tables(shape=None):
+    cell = shape or shapes.CHIP
+    if cell.key not in _SEG_TABLES:
         seg_map = np.full((HEIGHT, WIDTH), -1, dtype=np.int32)
-        for row in range(segments.ROWS):
-            for col in range(segments.COLS):
-                for seg in range(8):
-                    x0, x1, y0, y1 = segments.segment_pixels(col, row, seg)
+        for row in range(cell.rows):
+            for col in range(cell.cols):
+                for seg in range(len(cell)):
                     # nibble n of a frame is digit (n // 8), segment (n % 8):
-                    # low nibble first within a byte, 4 bytes per digit.
-                    seg_map[y0 : y1 + 1, x0 : x1 + 1] = (row * segments.COLS + col) * 8 + seg
+                    # low nibble first within a byte, 4 bytes per digit. How
+                    # many digits there are is the cell's business: a bigger
+                    # cell means a smaller grid.
+                    x0, x1, y0, y1 = cell.pixels(col, row, seg)
+                    seg_map[y0 : y1 + 1, x0 : x1 + 1] = (row * cell.cols + col) * 8 + seg
         flat = seg_map.ravel()
-        _SEG_MASK = np.flatnonzero(flat >= 0)
-        _SEG_NIBBLE = flat[_SEG_MASK]
-    return _SEG_MASK, _SEG_NIBBLE
+        mask = np.flatnonzero(flat >= 0)
+        _SEG_TABLES[cell.key] = (mask, flat[mask])
+    return _SEG_TABLES[cell.key]
 
 
-def index_image_from_frame(frame):
-    """One .seg frame (FRAME_BYTES) -> (600, 800) uint8 of stored intensities."""
-    mask, nibble_of = _segment_tables()
+def index_image_from_frame(frame, shape=None):
+    """One .seg frame -> (600, 800) uint8 of stored intensities.
+
+    A .seg file is bytes for one particular grid, so it can only be shown on
+    the cell that grid came from -- everything else would read the wrong
+    nibbles and look like noise rather than like a mistake."""
+    cell = shape or shapes.CHIP
+    if len(frame) != cell.frame_bytes:
+        raise ValueError(
+            f"this frame is {len(frame)} bytes; a {cell.cols}x{cell.rows} grid of "
+            f"{cell.cell_w}x{cell.cell_h} cells needs {cell.frame_bytes}"
+        )
+    mask, nibble_of = _segment_tables(shape)
     data = np.frombuffer(frame, dtype=np.uint8)
     nibbles = np.empty(len(data) * 2, dtype=np.uint8)
     nibbles[0::2] = data & 0xF
@@ -128,37 +156,46 @@ def index_image_from_png(path):
     return (rgb[..., 0] // 17).astype(np.uint8)
 
 
-_EFFECT_XY = None  # (x, y, is_dp) of every frame nibble's segment centre
+_EFFECT_XY = {}  # per cell: (x, y, is_dark) of every frame nibble's sample point
 
 
-def _effect_coords():
-    """Segment centres in frame-nibble order, as attract_proto.sample() takes
-    them: pixel coordinates from the grid's top-left, one per segment."""
-    global _EFFECT_XY
-    if _EFFECT_XY is None:
-        n = np.arange(segments.ROWS * segments.COLS * 8)
+def _effect_coords(shape=None):
+    """Sample points in frame-nibble order, as attract_proto.sample() takes
+    them: pixel coordinates from the grid's top-left, one per segment. At the
+    chip's own proportions these are attract_proto.SEG_CX/SEG_CY, which is
+    what the RTL's table holds; a variant moves them (tools/shapes.py)."""
+    cell = shape or shapes.CHIP
+    if cell.key not in _EFFECT_XY:
+        n = np.arange(cell.rows * cell.cols * 8)
         digit, seg = n // 8, n % 8
-        row, col = digit // segments.COLS, digit % segments.COLS
-        x = col * segments.CELL_W + np.array(attract_proto.SEG_CX)[seg]
-        y = row * segments.CELL_H + np.array(attract_proto.SEG_CY)[seg]
-        _EFFECT_XY = (x.astype(np.int64), y.astype(np.int64), seg == 7)
-    return _EFFECT_XY
+        row, col = digit // cell.cols, digit % cell.cols
+        # A cell with no room for the decimal point has no nibble 7 to draw,
+        # so it indexes offset 0 and is masked off by is_dark below.
+        ox = np.array([cell.sample(s)[0] if s < len(cell) else 0 for s in range(8)])
+        oy = np.array([cell.sample(s)[1] if s < len(cell) else 0 for s in range(8)])
+        dark = np.array([cell.is_dark(s) for s in range(8)])
+        x = col * cell.cell_w + ox[seg]
+        y = row * cell.cell_h + oy[seg]
+        _EFFECT_XY[cell.key] = (x.astype(np.int64), y.astype(np.int64), dark[seg])
+    return _EFFECT_XY[cell.key]
 
 
-def index_image_from_effect(name, frame, params, fade=15):
+def index_image_from_effect(name, frame, params, fade=15, shape=None):
     """One frame of an attract_proto effect -> (600, 800) uint8 of intensities.
 
     The effect's sample function is evaluated once over the whole frame as
     numpy arrays (attract_proto writes its maths so the same code runs on ints
     or arrays), then scattered like index_image_from_frame. DP stays dark, as
-    in attract_proto.sample(). `fade` (0..15) is attract_proto.apply_fade's
-    level, for the fade through black between effects.
+    in attract_proto.sample() -- and so does its nibble on a cell too wide to
+    have a decimal point at all.
+    `fade` (0..15) is attract_proto.apply_fade's level, for the fade through
+    black between effects.
     """
-    x, y, is_dp = _effect_coords()
+    x, y, is_dark = _effect_coords(shape)
     levels = np.asarray(attract_proto.EFFECTS[name](frame, **params)(x, y), dtype=np.int64)
     levels = attract_proto.apply_fade(levels, fade)
-    levels = np.where(is_dp, 0, levels).astype(np.uint8)
-    mask, nibble_of = _segment_tables()
+    levels = np.where(is_dark, 0, levels).astype(np.uint8)
+    mask, nibble_of = _segment_tables(shape)
     idx = np.zeros(HEIGHT * WIDTH, dtype=np.uint8)
     idx[mask] = levels[nibble_of]
     return idx.reshape(HEIGHT, WIDTH)
@@ -166,7 +203,7 @@ def index_image_from_effect(name, frame, params, fade=15):
 
 def list_clips(directory):
     """(path, frame_count) for every .seg in `directory` that is a whole number
-    of current-geometry frames.  Clips from the 640x480 era are not, and would
+    of chip-geometry frames.  Clips from the 640x480 era are not, and would
     render as noise, so they are left out rather than offered."""
     out = []
     for p in sorted(Path(directory).glob("*.seg")):
@@ -450,6 +487,8 @@ EFFECT_FPS = 60  # effects play at the chip's real frame rate
 EFFECT_FRAMES = 60 * EFFECT_FPS  # the frame slider spans a minute
 SOURCES = ("generator", "droplet", "effect")
 MIN_GAP_MS = 10  # idle time guaranteed between playback ticks, for input
+CELL_PX = 288  # width of the Digit tab's drawing; it fits the left column
+CELL_TILES = 3  # cells across and down there: one alone can't show the gaps
 PAD = 24
 CH_COLOURS = {"r": "#d32f2f", "g": "#2e7d32", "b": "#1565c0"}
 
@@ -471,7 +510,7 @@ class App:
         root.title("Palette builder")
         self.curve = {ch: list(segments.PRESETS[0][ch]) for ch in CHANNELS}
         self._photo = None
-        self._clip_idx = (None, None, None)  # (path, frame, index image) cache
+        self._clip_idx = (None, None, None, None)  # (path, frame, cell key, index image)
         self._drag = None  # which handle (0 = knee, 1 = second point) is held
         self._syncing = False
         self._playing = None  # the pending after() id while a clip plays
@@ -495,6 +534,18 @@ class App:
         self.param_line = tk.StringVar()
 
         self.channel = tk.StringVar(value="r")
+        # The segment proportions the levels are drawn into. The defaults are
+        # the chip's own geometry, which is the only one the Generator capture
+        # can be shown in.
+        self.digit_params = dict(shapes.DEFAULTS)
+        self.digit = shapes.CHIP
+        self.digit_vars = {}
+        self.digit_scales = {}
+        self.digit_labels = {}
+        self._digit_syncing = False  # while all five are being set at once
+        self.digit_info = tk.StringVar()
+        self.digit_bands = tk.StringVar()
+        self.digit_line = tk.StringVar()
         self.source = tk.StringVar(value="generator")
         self.bits = tk.IntVar(value=12)
         self.name = tk.StringVar(value="custom")
@@ -527,6 +578,9 @@ class App:
         pattern = ttk.Frame(self.tabs, padding=8)
         self.tabs.add(pattern, text="Pattern")
         self.pattern_tab = pattern
+        digit = ttk.Frame(self.tabs, padding=8)
+        self.tabs.add(digit, text="Digit")
+        self.digit_tab = digit
         right = ttk.Frame(self.root, padding=8)
         right.grid(row=0, column=1, sticky="nsew")
         self.root.columnconfigure(1, weight=1)
@@ -599,8 +653,16 @@ class App:
             # No clips (a fresh checkout or worktree: .seg files are
             # untracked), no Droplet source to choose.
             state = "disabled" if val == "droplet" and not self.clips else "normal"
-            ttk.Radiobutton(top, text=label, value=val, variable=self.source,
-                            command=self._source_changed, state=state).pack(side="left")
+            rb = ttk.Radiobutton(top, text=label, value=val, variable=self.source,
+                                 command=self._source_changed, state=state)
+            rb.pack(side="left")
+            if val == "generator":
+                # Kept, because the Digit tab disables it: the capture it
+                # reads is of the chip, so it is the chip's proportions or
+                # nothing.
+                self.gen_radio = rb
+            if val == "droplet":
+                self.clip_radio = rb  # likewise: a .seg file is chip-grid bytes
         ttk.Label(top, text="   Output:").pack(side="left")
         for val, label in ((12, "12-bit PmodVGA"), (6, "6-bit Tiny VGA")):
             ttk.Radiobutton(top, text=label, value=val, variable=self.bits, command=self.refresh).pack(side="left")
@@ -642,6 +704,43 @@ class App:
         self.param_frame = ttk.LabelFrame(pattern, text="Pattern parameters", padding=8)
         self.param_frame.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
         self._build_params()
+
+        # Digit tab: the segment proportions, drawn CELL_TILES cells across so
+        # the gap to the neighbouring digit shows -- that gap is the whole
+        # reason the grid reads as digits rather than as a mesh, and a single
+        # cell can't show it.
+        prop = ttk.LabelFrame(digit, text="Segment proportions (tools/shapes.py)", padding=4)
+        prop.grid(row=0, column=0, sticky="ew")
+        for i, (key, lo, hi, _default, help_text) in enumerate(shapes.PARAMS):
+            var = tk.IntVar(value=self.digit_params[key])
+            self.digit_vars[key] = var
+            label = ttk.Label(prop, text=key)
+            label.grid(row=2 * i, column=0, sticky="sw")
+            self.digit_labels[key] = label
+            scale = tk.Scale(prop, from_=lo, to=hi, orient="horizontal", length=170,
+                             variable=var, command=lambda _v: self._digit_changed())
+            scale.grid(row=2 * i, column=1, sticky="w")
+            self.digit_scales[key] = scale
+            tk.Label(prop, text=help_text, fg="#666666", font=("TkDefaultFont", 9),
+                     wraplength=250, justify="left").grid(row=2 * i + 1, column=0, columnspan=2,
+                                                          sticky="w", pady=(0, 4))
+        ttk.Button(prop, text="The chip's", command=self._digit_defaults).grid(
+            row=2 * len(shapes.PARAMS), column=0, sticky="w", pady=(4, 0))
+        self.cell = tk.Canvas(digit, width=CELL_PX, height=CELL_PX * 4 // 3,
+                              bg="black", highlightthickness=1)
+        self.cell.grid(row=1, column=0, pady=(8, 0))
+        tk.Label(digit, textvariable=self.digit_info, anchor="w", justify="left",
+                 font=("TkDefaultFont", 9)).grid(row=2, column=0, sticky="ew", pady=(4, 0))
+        # What the RTL would need for these proportions: the y bands naming
+        # the two nibbles a scanline fetches, and the cx predicate that picks
+        # between them -- slot0_seg/slot1_seg and xz_right | xz_dp.
+        ttk.Label(digit, text="cy bands -> (slot 0, slot 1), for the RTL:").grid(
+            row=3, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(digit, textvariable=self.digit_bands, state="readonly", width=34).grid(
+            row=4, column=0, sticky="ew")
+        ttk.Entry(digit, textvariable=self.digit_line, state="readonly", width=34).grid(
+            row=5, column=0, sticky="ew", pady=(2, 0))
+        self._update_digit_info()
         # Opening the Pattern tab shows the pattern: tuning one you can't see
         # is no use. Going back to Colour leaves the source alone, so the
         # palette can be tuned on the effect too.
@@ -914,6 +1013,86 @@ class App:
     def _tab_changed(self):
         if self.tabs.select() == str(self.pattern_tab):
             self._show_effect()
+        elif self.tabs.select() == str(self.digit_tab):
+            # Proportions are judged moving, and the zone plate is what the
+            # chip actually draws into them. The Generator source is a still
+            # -- and only ever the chip's own digit -- so leave it behind.
+            if self.source.get() == "generator":
+                self.effect.set("zoneplate")
+                self._build_params()
+                self._shown_effect = None
+            self._show_effect()
+
+    def _update_digit_info(self):
+        """The readouts, which follow the cell and not the palette -- so they
+        stay off the redraw path, where validate() and owner() would be paid
+        for on every frame of playback.
+
+        They are not decoration: these sliders change the cell, and the cell
+        changes how many digits there are and how fast the host has to feed
+        them, which is the part that decides whether a shape could be built."""
+        cell = self.digit
+        mask, bands = shapes.validate(cell)
+        self.digit_info.set(
+            "\n".join(shapes.grid(cell)
+                      + [f"{len(cell)}/{shapes.NIBBLES} nibbles, "
+                         f"slot 1 when {shapes.mask_text(cell, mask)}"])
+        )
+        self.digit_bands.set(shapes.band_text(cell, bands))
+        self.digit_line.set(shapes.call_text(self.digit_params))
+
+    def _digit_changed(self):
+        """A proportion slider moved: rebuild the cell.
+
+        Every combination of the six is drawable now that the cell follows
+        them, so there is nothing to refuse and nothing to narrow -- what
+        changes underneath is the grid, and _update_digit_info() reports it."""
+        # Tk fires a Scale's command for its initial value too, deferred to
+        # idle, so this runs once per slider on startup -- which just rebuilds
+        # the same cell.
+        if self._digit_syncing:
+            return  # mid-way through setting all six: wait for the last one
+        try:
+            params = {key: int(var.get()) for key, var in self.digit_vars.items()}
+        except (ValueError, self.tk.TclError):
+            return
+        if params != self.digit_params:
+            try:
+                cell = shapes.digit(**params)
+                shapes.validate(cell)  # the prefetch's rules, not just the drawing
+            except ValueError as e:
+                self._say(f"digit: {e}", bad=True)
+                return
+            self.digit_params, self.digit = params, cell
+            self._update_digit_info()
+        # The Generator source is test/gold/generator.png and a clip is a .seg
+        # file: both are bytes for the chip's own 64x37 grid of 12x16 cells,
+        # so neither can be read into any other cell. A variant is drawn from
+        # an effect, which is computed rather than stored.
+        chip_grid = self.digit.key == shapes.CHIP.key
+        self.gen_radio.config(
+            state="normal" if chip_grid and self.gen_idx is not None else "disabled")
+        self.clip_radio.config(state="normal" if chip_grid and self.clips else "disabled")
+        if not chip_grid and self.source.get() in ("generator", "droplet"):
+            self.source.set("effect")
+            self._sync_scale()
+        if self._playing is None:
+            self.refresh()  # while playing, the next tick picks it up
+
+    def _set_digit(self, params):
+        """Put `params` on the sliders, rebuilding once rather than six
+        times -- each set() fires the Scale's command on its own."""
+        self._digit_syncing = True
+        try:
+            for key, var in self.digit_vars.items():
+                var.set(params[key])
+        finally:
+            self._digit_syncing = False
+
+    def _digit_defaults(self):
+        """Back to the chip's own proportions."""
+        self._set_digit(shapes.DEFAULTS)
+        self._digit_changed()
 
     def _channel_changed(self):
         self._syncing = True
@@ -1036,31 +1215,38 @@ class App:
     # -- drawing --
 
     def _current_index_image(self):
+        shape = self.digit
         if self.source.get() == "generator":
             self._chip_preset = None
             if self.gen_idx is None:
                 raise ValueError(f"generator frame unavailable: {self.gen_error}")
+            if shape.key != shapes.CHIP.key:
+                # _digit_changed() disables the radio, so this is only
+                # reachable if that ever stops being true.
+                raise ValueError("the generator capture is of the chip's own digit; "
+                                 "a variant needs an effect")
             return self.gen_idx
         if self.source.get() == "effect":
             name, fade = self._effect_on_screen()
             params = self.effect_params[name]
-            key = (name, int(self.frame_scale.get()), tuple(sorted(params.items())), fade)
+            key = (shape.key, name, int(self.frame_scale.get()), tuple(sorted(params.items())), fade)
             # The chip drives its own palette from ui_in[4:1], so refresh()
             # colours it with that instead of the curve on the Colour tab.
             # Every other effect is a pattern to tune a curve against.
-            self._chip_preset = (attract_proto.chip_preset(key[1], **params)
+            self._chip_preset = (attract_proto.chip_preset(key[2], **params)
                                  if name == "chip" else None)
             if self._effect_idx[0] != key:
-                self._effect_idx = (key, index_image_from_effect(name, key[1], params, fade))
+                self._effect_idx = (key, index_image_from_effect(name, key[2], params, fade, shape))
             return self._effect_idx[1]
         self._chip_preset = None
         if not self.clips:
             raise ValueError("no current-geometry .seg clips found in the repo root")
         path, _ = self.clips[self.clip_box.current()]
         n = int(self.frame_scale.get())
-        if self._clip_idx[:2] != (path, n):
-            self._clip_idx = (path, n, index_image_from_frame(read_frame(path, n)))
-        return self._clip_idx[2]
+        if self._clip_idx[:3] != (path, n, shape.key):
+            self._clip_idx = (path, n, shape.key,
+                              index_image_from_frame(read_frame(path, n), shape))
+        return self._clip_idx[3]
 
     def _say(self, msg, bad=False):
         self.status.config(text=msg, fg="#b00020" if bad else "#1b5e20")
@@ -1109,6 +1295,42 @@ class App:
             else:
                 c.create_text(cx - 10, cy + 10, text=label, anchor="ne", fill=CH_COLOURS[active])
 
+    def _draw_cell(self, table):
+        """The digit at CELL_TILES cells across, in the palette being edited.
+        Alternate segments are drawn a few levels down, so neighbouring
+        segments are told apart at a glance -- and so it shows when a segment
+        grows into the one next to it in the next cell, which is what the
+        leftover column and rows exist to stop."""
+        c = self.cell
+        c.delete("all")
+        cell = self.digit
+        lut = palette_to_lut(table, self.bits.get())
+        w, h = cell.cell_w, cell.cell_h
+        # As big as CELL_TILES of this cell will go in the canvas: a 12x16
+        # cell gets 8 pixels each, a 40x50 one gets 2.
+        z = max(1, min(CELL_PX // (CELL_TILES * w), CELL_PX * 4 // 3 // (CELL_TILES * h)))
+        for gy in range(CELL_TILES):
+            for gx in range(CELL_TILES):
+                ox, oy = gx * w * z, gy * h * z
+                for seg in range(len(cell)):
+                    r, g, b = (int(v) for v in lut[0 if cell.is_dark(seg) else 15 - 4 * (seg & 1)])
+                    colour = f"#{r:02x}{g:02x}{b:02x}"
+                    x0, x1, y0, y1 = cell.rect(seg)
+                    c.create_rectangle(ox + x0 * z, oy + y0 * z,
+                                       ox + (x1 + 1) * z, oy + (y1 + 1) * z,
+                                       fill=colour, outline=colour)
+        # The middle cell is labelled: each segment's name at the point the
+        # generator samples it, which is the one pixel of a segment whose
+        # level the zone plate actually decides.
+        ox, oy = w * z, h * z
+        for seg in range(len(cell)):
+            sx, sy = cell.sample(seg)
+            px, py = ox + sx * z + z // 2, oy + sy * z + z // 2
+            ink = "#ffffff" if cell.is_dark(seg) else "#000000"
+            c.create_oval(px - 2, py - 2, px + 2, py + 2, fill=ink, outline="")
+            c.create_text(px + 4, py - 4, text=cell.name(seg), anchor="sw", fill=ink,
+                          font=("TkFixedFont", 8))
+
     def refresh(self):
         try:
             table = curve_table(self.curve)
@@ -1116,6 +1338,7 @@ class App:
             self._say(f"curve: {e}", bad=True)
             return
         self._draw_plot(table)
+        self._draw_cell(table)
         lut = palette_to_lut(table, self.bits.get())
         for i in range(16):
             r, g, b = (int(v) for v in lut[i])
@@ -1138,7 +1361,11 @@ class App:
         img = lut[idx]
         self._photo = self.tk.PhotoImage(data=b"P6\n%d %d\n255\n" % (WIDTH, HEIGHT) + img.tobytes())
         self.preview.config(image=self._photo)
-        warns = check_palette(table)
+        # Proportions that leave no gap to the next digit are legal, and the
+        # picture may even be what's wanted, but it is worth saying out loud:
+        # those leftover columns and rows are what stop the grid reading as a
+        # mesh (CLAUDE.md).
+        warns = check_palette(table) + shapes.warnings(self.digit)
         msg = "\n".join(warns) if warns else "All 16 entries distinct at 12-bit and 6-bit; entry 0 is black."
         if self._chip_preset is not None and not warns:
             msg = f"preview is on the chip's palette {self._chip_preset}; the curve below is unchanged"
