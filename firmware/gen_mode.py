@@ -25,6 +25,11 @@ import time
 
 from machine import Pin
 
+# Edit these to change what the chip comes up as; main()'s arguments still
+# override them for a one-off call.
+PMOD_TYPE = 1  # 0 = Digilent PmodVGA, 1 = Tiny VGA
+PALETTE = 3  # 0-7, one of the chip's built-in presets
+
 MODE = 32  # uio[7] -- 1 selects streamed data, 0 the internal generator
 STROBE = 31  # uio[6] -- stream strobe, carries config bytes while MODE is low
 DATA_BASE = 17  # ui_in[0..7] -> GPIO17..24, see firmware/seg_player.py
@@ -72,7 +77,7 @@ def send_config(packet):
         time.sleep_us(10)
 
 
-def main(pmod_type=1, palette=3, cycle=True, curve=None):
+def main(pmod_type=PMOD_TYPE, palette=PALETTE, cycle=True, curve=None):
     """
     `pmod_type`/`palette` pick the reset-time strap: pmod_type 0=Digilent
     PmodVGA, 1=Tiny VGA; palette 0-7 selects one of the chip's built-in
@@ -100,9 +105,8 @@ def main(pmod_type=1, palette=3, cycle=True, curve=None):
     # The strap register (src/config_port.v) only samples ui_in[3:0] while
     # rst_n is low, so this has to come after the clock
     # starts and pulse reset itself -- `mpremote run` execs one file with no
-    # access to a sibling module, so this is inlined rather than imported
-    # from select_mode.py (kept only as a standalone convenience for manual
-    # `mpremote run firmware/select_mode.py`-style poking).
+    # access to a sibling module, so this is repeated from seg_player.py
+    # rather than imported.
     strap = (palette << 1) | pmod_type
     for i in range(4):
         Pin(DATA_BASE + i, Pin.OUT, value=(strap >> i) & 1)

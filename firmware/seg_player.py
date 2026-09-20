@@ -37,6 +37,11 @@ import time
 import rp2
 from machine import Pin
 
+# Edit these to change what the chip comes up as; main()'s arguments still
+# override them for a one-off call.
+PMOD_TYPE = 1  # 0 = Digilent PmodVGA, 1 = Tiny VGA
+PALETTE = 3  # 0-7, one of the chip's built-in presets
+
 # Demoboard GPIO map, from the tt-demo-pcb README.  ui_in is contiguous on
 # GPIO17-24, which is what lets the whole byte leave in a single PIO `out`.
 #
@@ -215,7 +220,13 @@ class Player:
         self.file.close()
 
 
-def main(path="video.seg", video_fps=24.0, pmod_type=1, palette=3, curve=None):
+def main(
+    path="video.seg",
+    video_fps=24.0,
+    pmod_type=PMOD_TYPE,
+    palette=PALETTE,
+    curve=None,
+):
     """
     `pmod_type`/`palette` pick the reset-time strap: pmod_type 0=Digilent
     PmodVGA, 1=Tiny VGA; palette 0-7 selects one of the chip's built-in
@@ -247,8 +258,8 @@ def main(path="video.seg", video_fps=24.0, pmod_type=1, palette=3, curve=None):
     # pushing bytes -- pulsing rst_n also resets the core's write pointer,
     # and doing that once a stream is already running would desync the host
     # from the raster, the same class of corruption the delay-sweep tests
-    # exist to catch. Inlined rather than imported from select_mode.py:
-    # `mpremote run` execs one file with no access to a sibling module.
+    # exist to catch. `mpremote run` execs one file with no access to a
+    # sibling module, so this can't live in a shared helper.
     strap = (palette << 1) | pmod_type
     for i in range(4):
         Pin(DATA_BASE + i, Pin.OUT, value=(strap >> i) & 1)
