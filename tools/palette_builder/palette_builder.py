@@ -9,13 +9,14 @@ A palette is three per-channel curves (see "Colour palettes" in
 tools/segments.py): each a line from (0, 0) to a knee, then on through a
 second point until it clips at 15. The plot shows the start (fixed at black),
 the knee and the end -- where the line meets the plot's edge -- and you drag
-the knee and the end of the selected channel (or type the knee and a point
-the line passes through) and see the result on a frame
-of the generator, of a droplet clip, or of an attract-mode effect, as the
-12-bit PmodVGA (4 bits/channel) or the 6-bit Tiny VGA Pmod (2 bits/channel)
-would show it. What's drawn is always the curve after the chip's own
-quantisation -- slopes in eighths, rounded as the RTL rounds -- never the
-idealised line.
+the knee and the end of the selected channel -- or, with RGB selected, of all
+three channels at once, which moves them together and keeps the offsets
+between them -- and see the result on a frame of the generator, of a droplet
+clip, or of an attract-mode effect, as the 12-bit PmodVGA (4 bits/channel) or
+the 6-bit Tiny VGA Pmod (2 bits/channel) would show it. Hovering the preview
+magnifies the square under the cursor 3x, which is how a segment a pixel out
+is spotted. What's drawn is always the curve after the chip's own quantisation
+-- slopes in eighths, rounded as the RTL rounds -- never the idealised line.
 
 Effects come from tools/attract_proto.py (plasma, zone plate, interference, and
 `chip`, which is what the silicon actually draws -- its sliders are the chip's
@@ -307,6 +308,57 @@ def end_toward(x1, y1, fx, fy):
     return end_nearest(x1, y1, *target)
 
 
+def legal_points(pts):
+    """Nudge points into the hardware's legal range rather than refuse them,
+    so a drag never sticks against an illegal combination."""
+    x1, y1, x2, y2 = pts
+    x1 = min(x1, 14)
+    if x1 == 0:
+        y1 = 0
+    x2 = max(x2, x1 + 1)
+    y2 = max(y2, y1)
+    return [x1, y1, x2, y2]
+
+
+def drag_handles(start, handle, ref, to):
+    """Where the dragged channels land when `ref`'s `handle` (0 = knee,
+    1 = end) is dragged to `to`.
+
+    `start` maps each channel being dragged to the points it had when the drag
+    began. `ref`'s handle follows the cursor exactly; any others move by the
+    same delta from where *they* started, so dragging in RGB mode keeps the
+    offsets between the channels instead of collapsing them onto one curve.
+    The lines will generally not stay parallel: the slopes the chip can store
+    depend on the knee, so each channel snaps to its own nearest one.
+
+    Everything is measured from the start of the drag rather than from the
+    last step, so a channel that clips against the plot's edge springs back
+    when the cursor comes back instead of having lost the offset for good.
+    """
+    out = {}
+    if handle == 0:
+        rx, ry = start[ref][:2]
+        dx, dy = to[0] - rx, to[1] - ry
+        for ch, pts in start.items():
+            end = curve_end(*pts)
+            x = min(14, max(0, pts[0] + dx))
+            # The knee moves; the end stays where it is on the edge, rather
+            # than the line swinging about a hidden through-point.
+            y = 0 if x == 0 else min(15, max(0, pts[1] + dy))
+            out[ch] = legal_points([x, y, *end_nearest(x, y, *end)])
+    else:
+        ex, ey = curve_end(*start[ref])
+        dx, dy = to[0] - ex, to[1] - ey
+        for ch, pts in start.items():
+            x1, y1 = pts[:2]
+            cx, cy = curve_end(*pts)
+            # Aimed, not clamped to the plot: an aim past the edge is how the
+            # steepest and shallowest slopes are reached, and clamping it
+            # would quietly change the delta for that channel alone.
+            out[ch] = legal_points([x1, y1, *end_toward(x1, y1, cx + dx, cy + dy)])
+    return out
+
+
 def palette_to_lut(palette, bits):
     """16 x (r, g, b) 4-bit entries -> 16 x 3 uint8 as the given Pmod shows them."""
     p = np.array(palette, dtype=np.int32)
@@ -490,7 +542,16 @@ MIN_GAP_MS = 10  # idle time guaranteed between playback ticks, for input
 CELL_PX = 288  # width of the Digit tab's drawing; it fits the left column
 CELL_TILES = 3  # cells across and down there: one alone can't show the gaps
 PAD = 24
+LEFT_W = 2 * PAD + 15 * PLOT  # the curve plot, and so the whole left column
+LENS = 3  # preview magnifier: screen pixels per image pixel under the cursor
+LENS_PX = 150  # and how big the magnified square is on screen
+LENS_OFF = 18  # and it sits this far off the cursor, rather than on top of
+# the very pixels it is showing
 CH_COLOURS = {"r": "#d32f2f", "g": "#2e7d32", "b": "#1565c0"}
+# The fourth "Edit channel" button. Deliberately not "rgb": CHANNELS *is* that
+# string, so a value that indexed self.curve by accident would read as a
+# channel rather than raising.
+ALL_CHANNELS = "all"
 
 
 def _faded(colour, amount=0.6):
@@ -509,10 +570,12 @@ class App:
         self.root = root
         root.title("Palette builder")
         self.curve = {ch: list(segments.PRESETS[0][ch]) for ch in CHANNELS}
-        self._photo = None
+        self._img = None  # the last rendered frame, for the magnifier
+        self._lens_at = None  # image coords the magnifier is centred on
         self._clip_idx = (None, None, None, None)  # (path, frame, cell key, index image)
-        self._drag = None  # which handle (0 = knee, 1 = second point) is held
-        self._syncing = False
+        self._drag = None  # which handle (0 = knee, 1 = end) is held
+        self._drag_ref = "r"  # the channel whose handle the cursor is on
+        self._drag_from = {}  # each dragged channel's points when it started
         self._playing = None  # the pending after() id while a clip plays
         self._anchor = None  # (monotonic time, frame) effect playback counts from
         self._anchor_last = None  # the frame the last tick set, to spot a hand drag
@@ -550,7 +613,6 @@ class App:
         self.bits = tk.IntVar(value=12)
         self.name = tk.StringVar(value="custom")
         self.slot = tk.IntVar(value=0)
-        self.point_vars = [tk.IntVar() for _ in range(4)]
 
         try:
             self.gen_idx = index_image_from_png(GENERATOR_PNG)
@@ -563,7 +625,7 @@ class App:
         if self.gen_idx is None:
             self.source.set("droplet" if self.clips else "effect")
         self._sync_scale()
-        self._channel_changed()
+        self.refresh()
 
     # -- layout --
 
@@ -589,32 +651,19 @@ class App:
         chans = ttk.Frame(left)
         chans.grid(row=0, column=0, sticky="w")
         ttk.Label(chans, text="Edit channel:").pack(side="left")
-        for ch in CHANNELS:
+        for value, label in [(ch, ch.upper()) for ch in CHANNELS] + [(ALL_CHANNELS, "RGB")]:
             ttk.Radiobutton(
-                chans, text=ch.upper(), value=ch, variable=self.channel, command=self._channel_changed
+                chans, text=label, value=value, variable=self.channel, command=self.refresh
             ).pack(side="left")
 
-        size = 2 * PAD + 15 * PLOT
-        self.plot = tk.Canvas(left, width=size, height=size, bg="white", highlightthickness=1)
+        self.plot = tk.Canvas(left, width=LEFT_W, height=LEFT_W, bg="white", highlightthickness=1)
         self.plot.grid(row=1, column=0, pady=4)
         self.plot.bind("<Button-1>", self._on_press)
         self.plot.bind("<B1-Motion>", self._on_drag)
         self.plot.bind("<ButtonRelease-1>", lambda _e: setattr(self, "_drag", None))
 
-        pts = ttk.Frame(left)
-        pts.grid(row=2, column=0, sticky="w")
-        # The second pair is the whole-number point the line passes through
-        # (what's saved), not the end handle, which usually sits between
-        # whole numbers -- see curve_end().
-        for i, label in enumerate(("knee x", "y", "  through x", "y")):
-            ttk.Label(pts, text=label).pack(side="left")
-            sb = tk.Spinbox(pts, from_=0, to=15, width=3, textvariable=self.point_vars[i],
-                            command=self._on_spin)
-            sb.bind("<Return>", lambda _e: self._on_spin())
-            sb.pack(side="left")
-
         self.swatch_row = tk.Frame(left)
-        self.swatch_row.grid(row=3, column=0, pady=4)
+        self.swatch_row.grid(row=2, column=0, pady=4)
         self.swatches = []
         for i in range(16):
             sw = tk.Label(self.swatch_row, width=2, height=1, relief="sunken", text=f"{i:X}",
@@ -623,7 +672,7 @@ class App:
             self.swatches.append(sw)
 
         pre = ttk.LabelFrame(left, text="Start from a built-in preset", padding=4)
-        pre.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        pre.grid(row=3, column=0, sticky="ew", pady=(8, 0))
         for n, p in enumerate(segments.PRESETS):
             # Three across, not four: the left column has to leave room for
             # the 1:1 preview on a 1280-wide laptop screen.
@@ -632,14 +681,14 @@ class App:
             )
 
         io = ttk.LabelFrame(left, text="Save / export", padding=4)
-        io.grid(row=5, column=0, sticky="ew", pady=(8, 0))
+        io.grid(row=4, column=0, sticky="ew", pady=(8, 0))
         ttk.Entry(io, textvariable=self.name, width=14).grid(row=0, column=0, columnspan=3, sticky="w")
         ttk.Button(io, text="Save", width=6, command=self._save).grid(row=1, column=0)
         ttk.Button(io, text="Open...", width=7, command=self._open).grid(row=1, column=1)
         ttk.Button(io, text="Export", width=7, command=self._export).grid(row=1, column=2)
 
         chip = ttk.LabelFrame(left, text="Chip presets (presets.json -> src/)", padding=4)
-        chip.grid(row=6, column=0, sticky="ew", pady=(8, 0))
+        chip.grid(row=5, column=0, sticky="ew", pady=(8, 0))
         ttk.Label(chip, text="slot").grid(row=0, column=0)
         ttk.Spinbox(chip, from_=0, to=segments.N_PRESETS - 1, width=3, textvariable=self.slot).grid(row=0, column=1)
         ttk.Button(chip, text="Load", width=5, command=self._load_slot).grid(row=0, column=2)
@@ -729,8 +778,13 @@ class App:
         self.cell = tk.Canvas(digit, width=CELL_PX, height=CELL_PX * 4 // 3,
                               bg="black", highlightthickness=1)
         self.cell.grid(row=1, column=0, pady=(8, 0))
+        # Wrapped to the left column's own width: the host line is 83
+        # characters, and unwrapped it set the whole tab's width, which made
+        # the notebook wider than the Colour tab and pushed the preview off a
+        # 1280-wide screen.
         tk.Label(digit, textvariable=self.digit_info, anchor="w", justify="left",
-                 font=("TkDefaultFont", 9)).grid(row=2, column=0, sticky="ew", pady=(4, 0))
+                 wraplength=LEFT_W, font=("TkDefaultFont", 9)).grid(
+                     row=2, column=0, sticky="ew", pady=(4, 0))
         # What the RTL would need for these proportions: the y bands naming
         # the two nibbles a scanline fetches, and the cx predicate that picks
         # between them -- slot0_seg/slot1_seg and xz_right | xz_dp.
@@ -746,10 +800,34 @@ class App:
         # palette can be tuned on the effect too.
         self.tabs.bind("<<NotebookTabChanged>>", lambda _e: self._tab_changed())
 
-        self.preview = tk.Label(right, bd=1, relief="sunken")
-        self.preview.grid(row=2, column=0)
+        # A Canvas with the frame as an item, not a Label with an image: the
+        # magnifier is a second item on the same canvas, and moving an item
+        # repaints only the damage (2 ms). As a child *widget* over an image
+        # Label it cost a repaint of the whole 800x600 picture (19 ms) on
+        # every mouse move, which is what made it trail the cursor while a
+        # pattern played. Both images are written in place with put() for the
+        # same reason -- a new PhotoImage per frame was another 5 ms.
+        # The sunken border goes on a wrapper rather than on the canvas: Tk
+        # draws a canvas's own border over canvas coordinate 0, which would
+        # hide the frame's outside row and column and put every lens
+        # coordinate a pixel out.
+        frame = tk.Frame(right, bd=1, relief="sunken")
+        frame.grid(row=2, column=0)
+        self.preview = tk.Canvas(frame, width=WIDTH, height=HEIGHT, bd=0,
+                                 highlightthickness=0, bg="black")
+        self.preview.pack()
+        self._photo = tk.PhotoImage(width=WIDTH, height=HEIGHT)
+        self.preview.create_image(0, 0, anchor="nw", image=self._photo)
+        self._lens_photo = tk.PhotoImage(width=LENS_PX, height=LENS_PX)
+        self._lens_item = self.preview.create_image(0, 0, anchor="nw", image=self._lens_photo,
+                                                    state="hidden")
+        self.preview.bind("<Motion>", self._lens_show)
+        self.preview.bind("<Leave>", self._lens_hide)
         self.status = tk.Label(right, justify="left", anchor="w", wraplength=WIDTH)
         self.status.grid(row=3, column=0, sticky="ew", pady=4)
+        # What the window's own theme uses, to go back to after a warning.
+        self._status_fg = self.status.cget("fg")
+        self._status_bg = self.status.cget("bg")
 
         self.root.bind("<Key>", self._on_key)
 
@@ -1094,61 +1172,46 @@ class App:
         self._set_digit(shapes.DEFAULTS)
         self._digit_changed()
 
-    def _channel_changed(self):
-        self._syncing = True
-        for var, v in zip(self.point_vars, self.curve[self.channel.get()]):
-            var.set(v)
-        self._syncing = False
-        self.refresh()
+    def _edit_channels(self):
+        """The channels a drag moves: all three with RGB selected."""
+        ch = self.channel.get()
+        return list(CHANNELS) if ch == ALL_CHANNELS else [ch]
 
-    def _set_points(self, pts):
-        """Try new points for the selected channel; nudge them into the
-        hardware's legal range rather than refuse, so a drag never sticks."""
-        x1, y1, x2, y2 = pts
-        x1 = min(x1, 14)
-        if x1 == 0:
-            y1 = 0
-        x2 = max(x2, x1 + 1)
-        y2 = max(y2, y1)
-        self.curve[self.channel.get()] = [x1, y1, x2, y2]
-        self._channel_changed()
-
-    def _on_spin(self):
-        if self._syncing:
-            return
-        try:
-            self._set_points([int(v.get()) for v in self.point_vars])
-        except (ValueError, self.tk.TclError):
-            pass
+    def _handles(self, ch):
+        """(knee, end) for `ch`, in plot units."""
+        pts = self.curve[ch]
+        return tuple(pts[:2]), curve_end(*pts)
 
     def _on_press(self, e):
-        pts = self.curve[self.channel.get()]
-        d = [
-            (e.x - cx) ** 2 + (e.y - cy) ** 2
-            for cx, cy in (self._to_canvas(*pts[:2]), self._to_canvas(*curve_end(*pts)))
-        ]
-        self._drag = 0 if d[0] <= d[1] else 1
+        # Nearest handle wins, over every channel being edited -- so in RGB
+        # mode the one you grab is the one that follows the cursor. A tie
+        # keeps the knee, which is drawn on top.
+        best = None
+        for ch in self._edit_channels():
+            for handle, (x, y) in enumerate(self._handles(ch)):
+                cx, cy = self._to_canvas(x, y)
+                d = (e.x - cx) ** 2 + (e.y - cy) ** 2
+                if best is None or d < best[0]:
+                    best = (d, handle, ch)
+        _d, self._drag, self._drag_ref = best
+        self._drag_from = {ch: list(self.curve[ch]) for ch in self._edit_channels()}
         self._on_drag(e)
 
     def _on_drag(self, e):
         if self._drag is None:
             return
-        x1, y1, x2, y2 = self.curve[self.channel.get()]
         if self._drag == 0:
-            # The knee moves; the end stays where it is on the edge, rather
-            # than the line swinging about a hidden through-point.
-            end = curve_end(x1, y1, x2, y2)
             kx, ky = self._from_canvas(e.x, e.y)
             kx = min(kx, 14)
-            ky = 0 if kx == 0 else ky
-            ky = min(ky, 15)
-            self._set_points([kx, ky, *end_nearest(kx, ky, *end)])
+            to = (kx, 0 if kx == 0 else ky)
         else:
-            self._set_points([x1, y1, *end_toward(x1, y1, *self._from_canvas_f(e.x, e.y))])
+            to = self._from_canvas_f(e.x, e.y)
+        self.curve.update(drag_handles(self._drag_from, self._drag, self._drag_ref, to))
+        self.refresh()
 
     def _set_curve(self, curve):
         self.curve = {ch: list(curve[ch]) for ch in CHANNELS}
-        self._channel_changed()
+        self.refresh()
 
     def _load_preset(self, n):
         self._set_curve(segments.PRESETS[n])
@@ -1248,8 +1311,59 @@ class App:
                               index_image_from_frame(read_frame(path, n), shape))
         return self._clip_idx[3]
 
+    # -- preview magnifier --
+
+    def _lens_hide(self, _e=None):
+        self._lens_at = None
+        self.preview.itemconfigure(self._lens_item, state="hidden")
+
+    def _lens_show(self, e):
+        """Magnify the square centred on the cursor. Drawn beside the cursor
+        (see LENS_OFF), and flipped to its other side at the right and bottom
+        edges rather than clamped, so it stays inside the picture."""
+        if self._img is None:
+            return
+        x, y = int(self.preview.canvasx(e.x)), int(self.preview.canvasy(e.y))
+        if not (0 <= x < WIDTH and 0 <= y < HEIGHT):
+            self._lens_hide()
+            return
+        self._lens_at = (x, y)
+        self._draw_lens()
+        lx = x + LENS_OFF if x + LENS_OFF + LENS_PX <= WIDTH else x - LENS_OFF - LENS_PX
+        ly = y + LENS_OFF if y + LENS_OFF + LENS_PX <= HEIGHT else y - LENS_OFF - LENS_PX
+        self.preview.coords(self._lens_item, lx, ly)
+        self.preview.itemconfigure(self._lens_item, state="normal")
+
+    def _draw_lens(self):
+        """The magnified crop, from the frame the preview last drew -- so it
+        follows playback as well as the cursor."""
+        if self._lens_at is None or self._img is None:
+            return
+        x, y = self._lens_at
+        n, PL = LENS_PX // LENS, LENS_PX
+        # At the edges the square stays whole and stops following the cursor,
+        # rather than shrinking or showing black.
+        x0 = min(max(x - n // 2, 0), WIDTH - n)
+        y0 = min(max(y - n // 2, 0), HEIGHT - n)
+        crop = self._img[y0 : y0 + n, x0 : x0 + n]
+        big = np.repeat(np.repeat(crop, LENS, axis=0), LENS, axis=1)
+        # A two-pixel white-on-black edge, painted into the image rather than
+        # drawn as a second canvas item: one item is one lot of damage to
+        # repaint, and the pattern underneath is as often white as black.
+        for ring, v in ((0, 255), (1, 0)):
+            big[ring, ring:PL - ring] = big[PL - 1 - ring, ring:PL - ring] = v
+            big[ring:PL - ring, ring] = big[ring:PL - ring, PL - 1 - ring] = v
+        self._lens_photo.put(b"P6\n%d %d\n255\n" % (LENS_PX, LENS_PX) + big.tobytes())
+
     def _say(self, msg, bad=False):
-        self.status.config(text=msg, fg="#b00020" if bad else "#1b5e20")
+        # White on dark red, not red on the window's own background: red
+        # against green is the one pair a red/green colour blind reader can't
+        # tell apart, and dark red text is hard to read on a dark theme
+        # besides. The warning is a filled block; anything fine is plain text.
+        if bad:
+            self.status.config(text=msg, fg="white", bg="#b00020")
+        else:
+            self.status.config(text=msg, fg=self._status_fg, bg=self._status_bg)
 
     def _draw_plot(self, table):
         c = self.plot
@@ -1259,10 +1373,10 @@ class App:
             _, y = self._to_canvas(0, i)
             c.create_line(x, PAD, x, PAD + 15 * PLOT, fill="#eeeeee")
             c.create_line(PAD, y, PAD + 15 * PLOT, y, fill="#eeeeee")
-        active = self.channel.get()
+        active = self._edit_channels()
         for ch_i, ch in enumerate(CHANNELS):
             col = CH_COLOURS[ch]
-            width = 3 if ch == active else 1
+            width = 3 if ch in active else 1
             # What the chip draws: the quantised values, as a stepped line.
             pts = [self._to_canvas(i, table[i][ch_i]) for i in range(16)]
             c.create_line(*[v for p in pts for v in p], fill=col, width=width)
@@ -1270,9 +1384,10 @@ class App:
                 c.create_oval(px - 2, py - 2, px + 2, py + 2, fill=col, outline=col)
         # The other channels' knee and end, faded and dashed, so it's clear
         # where they sit without looking grabbable. Drawn first, so the
-        # edited channel's handles land on top where they coincide.
+        # edited channels' handles land on top where they coincide. In RGB
+        # mode there are none: every handle is grabbable.
         for ch in CHANNELS:
-            if ch == active:
+            if ch in active:
                 continue
             pts = self.curve[ch]
             for x, y in (pts[:2], curve_end(*pts)):
@@ -1284,16 +1399,21 @@ class App:
         sx, sy = self._to_canvas(0, 0)
         c.create_oval(sx - 4, sy - 4, sx + 4, sy + 4, fill="#777777", outline="#777777")
         c.create_text(sx + 8, sy - 6, text="start", anchor="sw", fill="#777777")
-        # Handles for the channel being edited: the knee, and the end --
-        # where the line meets the edge, not the stored through-point.
-        pts = self.curve[active]
-        for (x, y), label, where in ((pts[:2], "knee", "below"), (curve_end(*pts), "end", "left")):
-            cx, cy = self._to_canvas(x, y)
-            c.create_rectangle(cx - 6, cy - 6, cx + 6, cy + 6, outline=CH_COLOURS[active], width=2)
-            if where == "below":
-                c.create_text(cx + 10, cy + 10, text=label, anchor="nw", fill=CH_COLOURS[active])
-            else:
-                c.create_text(cx - 10, cy + 10, text=label, anchor="ne", fill=CH_COLOURS[active])
+        # Handles for the channels being edited: the knee, and the end --
+        # where the line meets the edge, not the stored through-point. With
+        # three sets of handles up, only the last one grabbed is labelled;
+        # three "knee"/"end" pairs on one plot is noise.
+        labelled = self._drag_ref if len(active) > 1 else active[0]
+        for ch in active:
+            for (x, y), label, where in zip(self._handles(ch), ("knee", "end"), ("below", "left")):
+                cx, cy = self._to_canvas(x, y)
+                c.create_rectangle(cx - 6, cy - 6, cx + 6, cy + 6, outline=CH_COLOURS[ch], width=2)
+                if ch != labelled:
+                    continue
+                if where == "below":
+                    c.create_text(cx + 10, cy + 10, text=label, anchor="nw", fill=CH_COLOURS[ch])
+                else:
+                    c.create_text(cx - 10, cy + 10, text=label, anchor="ne", fill=CH_COLOURS[ch])
 
     def _draw_cell(self, table):
         """The digit at CELL_TILES cells across, in the palette being edited.
@@ -1359,8 +1479,9 @@ class App:
                 self.bits.get(),
             )
         img = lut[idx]
-        self._photo = self.tk.PhotoImage(data=b"P6\n%d %d\n255\n" % (WIDTH, HEIGHT) + img.tobytes())
-        self.preview.config(image=self._photo)
+        self._img = img
+        self._photo.put(b"P6\n%d %d\n255\n" % (WIDTH, HEIGHT) + img.tobytes())
+        self._draw_lens()
         # Proportions that leave no gap to the next digit are legal, and the
         # picture may even be what's wanted, but it is worth saying out loud:
         # those leftover columns and rows are what stop the grid reading as a

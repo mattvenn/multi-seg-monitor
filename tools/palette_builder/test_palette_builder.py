@@ -248,6 +248,43 @@ def test_curve_end_sits_on_the_edge_and_every_slope_is_reachable():
             assert segments.curve_params(x1, y1, *again) == segments.curve_params(x1, y1, x2, y2)
 
 
+def test_rgb_drag_moves_every_channel_by_the_same_delta():
+    """With RGB selected, dragging one channel's handle moves all three and
+    keeps the offsets between them: the channel under the cursor lands exactly
+    where a single-channel drag would, the others by the same delta."""
+    start = {"r": [4, 4, 10, 12], "g": [6, 2, 11, 9], "b": [2, 7, 7, 15]}
+    for pts in start.values():
+        segments.curve_params(*pts)  # the fixture itself has to be drawable
+    for to in ((5, 5), (3, 3), (7, 7), (4, 4)):
+        out = pb.drag_handles(start, 0, "r", to)
+        dx, dy = to[0] - start["r"][0], to[1] - start["r"][1]
+        assert tuple(out["r"][:2]) == to  # the grabbed channel follows the cursor
+        for ch in "rgb":
+            assert out[ch][:2] == [start[ch][0] + dx, start[ch][1] + dy], (ch, to)
+            segments.curve_params(*out[ch])  # and each is still one the chip can draw
+    # The end handle: the grabbed channel lands where the aim says, which for
+    # a single channel is the drag the editor has always done.
+    x1, y1 = start["g"][:2]
+    for to in ((15.0, 4.0), (9.5, 15.0), (15.0, 15.0)):
+        out = pb.drag_handles(start, 1, "g", to)
+        assert out["g"] == pb.legal_points([x1, y1, *pb.end_toward(x1, y1, *to)])
+        for ch in "rgb":
+            assert out[ch][:2] == start[ch][:2]  # an end drag leaves the knees alone
+            segments.curve_params(*out[ch])
+
+
+def test_a_channel_against_the_edge_springs_back():
+    """Dragging RGB into a corner clips the channel that gets there first, but
+    the offsets come back when the cursor does -- because every step is
+    measured from where the drag began, not from the step before."""
+    start = {"r": [2, 3, 8, 12], "g": [5, 6, 9, 13], "b": [8, 9, 12, 15]}
+    far = pb.drag_handles(start, 0, "r", (11, 6))  # b's knee would be at x=17
+    assert far["b"][0] == 14  # clipped, not 17
+    back = pb.drag_handles(start, 0, "r", (2, 3))  # all the way back
+    for ch in "rgb":
+        assert back[ch][:2] == start[ch][:2], ch
+
+
 def test_effect_index_image_matches_attract_proto():
     """The builder evaluates an effect over the whole frame as numpy arrays;
     attract_proto.sample() is the scalar reference. They must agree segment
