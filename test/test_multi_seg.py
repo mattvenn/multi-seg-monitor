@@ -797,6 +797,8 @@ async def test_generator_cycles_through_presets(dut):
     cocotb.start_soon(Clock(dut.clk, CLK_PS, unit="ps").start())
     await reset(dut, strap=0b1110)  # Digilent, preset 7: also checks the wrap to 0
 
+    import attract_proto
+
     dut.user_project.core.frame_ctr.value = 0x1FF
     await FallingEdge(dut.vs)
     await ClockCycles(dut.clk, 4)
@@ -804,6 +806,11 @@ async def test_generator_cycles_through_presets(dut):
     assert int(dut.user_project.core.pal_params.value) == segments.pack_params(
         segments.PRESET_PARAMS[0]
     )
+
+    # attract_proto.chip_preset() is what palette_builder colours the `chip`
+    # effect with, so it has to wrap where the chip does. frame_ctr is 0x200
+    # by now, which is one step on from the strapped 7.
+    assert attract_proto.chip_preset(0x200 - attract_proto.CHIP_RESET_FRAME, palette=7) == 0
 
 
 # --------------------------------------------------------------------------

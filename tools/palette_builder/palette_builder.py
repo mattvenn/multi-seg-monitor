@@ -17,7 +17,11 @@ would show it. What's drawn is always the curve after the chip's own
 quantisation -- slopes in eighths, rounded as the RTL rounds -- never the
 idealised line.
 
-Effects come from tools/attract_proto.py (plasma, zone plate, interference).
+Effects come from tools/attract_proto.py (plasma, zone plate, interference, and
+`chip`, which is what the silicon actually draws -- its sliders are the chip's
+four DIP switch fields, and it colours itself from ui_in[3:1] rather than from
+the curve being edited).
+
 The left column has two tabs, Colour (the palette curves) and Pattern (the
 effect and its own tuning sliders, rebuilt when you switch effect); both act
 on the one preview. Play runs an effect at the chip's real 60 fps. The
@@ -479,6 +483,9 @@ class App:
         self.effect = tk.StringVar(value="plasma")
         self.effect_params = {n: attract_proto.default_params(n) for n in attract_proto.PARAMS}
         self._effect_idx = (None, None)  # (key, index image) cache
+        # Which built-in preset the chip effect is showing, or None when the
+        # preview should use the curve being edited.
+        self._chip_preset = None
         self._change = None  # {"old", "start"} while fading between effects
         self._shown_effect = None  # the effect actually on screen
         self._fade_job = None  # after() id of the paused-fade pump
@@ -1030,6 +1037,7 @@ class App:
 
     def _current_index_image(self):
         if self.source.get() == "generator":
+            self._chip_preset = None
             if self.gen_idx is None:
                 raise ValueError(f"generator frame unavailable: {self.gen_error}")
             return self.gen_idx
@@ -1037,9 +1045,15 @@ class App:
             name, fade = self._effect_on_screen()
             params = self.effect_params[name]
             key = (name, int(self.frame_scale.get()), tuple(sorted(params.items())), fade)
+            # The chip drives its own palette from ui_in[4:1], so refresh()
+            # colours it with that instead of the curve on the Colour tab.
+            # Every other effect is a pattern to tune a curve against.
+            self._chip_preset = (attract_proto.chip_preset(key[1], **params)
+                                 if name == "chip" else None)
             if self._effect_idx[0] != key:
                 self._effect_idx = (key, index_image_from_effect(name, key[1], params, fade))
             return self._effect_idx[1]
+        self._chip_preset = None
         if not self.clips:
             raise ValueError("no current-geometry .seg clips found in the repo root")
         path, _ = self.clips[self.clip_box.current()]
@@ -1107,14 +1121,28 @@ class App:
             r, g, b = (int(v) for v in lut[i])
             self.swatches[i].config(bg=f"#{r:02x}{g:02x}{b:02x}", fg="white" if r + g + b < 300 else "black")
         try:
-            img = lut[self._current_index_image()]
+            idx = self._current_index_image()
         except (ValueError, IndexError, OSError) as e:
             self._say(str(e), bad=True)
             return
+        # The chip effect is the chip, palette included: it holds ui_in[3:1]
+        # in manual mode and steps through the presets otherwise, fading
+        # through black across each change. Only the preview follows it --
+        # the plot and the swatches above still show the curve being edited,
+        # because that is what Save and Export write.
+        if self._chip_preset is not None:
+            lut = palette_to_lut(
+                segments.curve_palette(segments.PRESET_PARAMS[self._chip_preset]),
+                self.bits.get(),
+            )
+        img = lut[idx]
         self._photo = self.tk.PhotoImage(data=b"P6\n%d %d\n255\n" % (WIDTH, HEIGHT) + img.tobytes())
         self.preview.config(image=self._photo)
         warns = check_palette(table)
-        self._say("\n".join(warns) if warns else "All 16 entries distinct at 12-bit and 6-bit; entry 0 is black.", bool(warns))
+        msg = "\n".join(warns) if warns else "All 16 entries distinct at 12-bit and 6-bit; entry 0 is black."
+        if self._chip_preset is not None and not warns:
+            msg = f"preview is on the chip's palette {self._chip_preset}; the curve below is unchanged"
+        self._say(msg, bool(warns))
 
 
 def main():

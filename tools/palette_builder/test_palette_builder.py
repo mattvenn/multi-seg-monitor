@@ -308,6 +308,41 @@ def test_effect_param_defaults_are_in_range():
         assert {k: v.default for k, v in sig.items() if k != "frame"} == attract_proto.default_params(name), name
 
 
+def test_chip_effect_drives_its_own_palette():
+    """The chip effect is the whole chip, colour included: the preview
+    follows ui_in[3:1] and the automatic change rather than the curve being
+    edited. The change must land while the screen is black, which is the
+    whole reason the fade is there."""
+    import attract_proto
+    import segments
+
+    p = attract_proto.default_params("chip")
+    assert set(p) == {"palette", "manual", "vary_phase", "vary_drift"}
+
+    # Automatic: preset 0 for the first 512 frames, then 1, then 2 -- counted
+    # from frame_ctr's reset value of 32, not from 0.
+    assert [attract_proto.chip_preset(f, **p) for f in (0, 479, 480, 991, 992)] == [0, 0, 1, 1, 2]
+    # ...and both frames either side of each change are fully black.
+    for f in (479, 480, 991, 992):
+        assert attract_proto.chip_fade(attract_proto.CHIP_RESET_FRAME + f) == 0, f
+
+    # A start other than 0 shifts the whole cycle, so a board strapped and
+    # switched to the same palette agrees with itself.
+    assert [attract_proto.chip_preset(f, palette=5) for f in (0, 480, 1504)] == [5, 6, 0]
+
+    # Manual holds one palette and never fades: nothing is changing, so there
+    # is nothing to hide.
+    held = dict(p, manual=1, palette=3)
+    assert {attract_proto.chip_preset(f, **held) for f in (0, 479, 480, 5000)} == {3}
+    for f in (0, 479, 480, 5000):
+        ctr = attract_proto.CHIP_RESET_FRAME + f
+        assert attract_proto.chip_fade(ctr, auto=not held["manual"]) == 15, f
+
+    # Every preset the effect can name must be one the chip really has.
+    for n in range(8):
+        pb.palette_to_lut(segments.curve_palette(segments.PRESET_PARAMS[n]), 12)
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):
