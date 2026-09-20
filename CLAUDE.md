@@ -322,12 +322,24 @@ expensive thing here, and placement adds about x1.15 over synthesised area for
 new logic (x1.4 over the whole design).
 
 This glyph adds 11 flops on top of that — `cy` (5) and `row` (6), which used to
-be slices of `y_px` — for about 0.6k µm² placed, under half a point. Everything
-else it changed was constants. Watch the CI number rather than trusting that
-estimate.
+be slices of `y_px` — and everything else it changed was constants.
 
-**That is over budget** (80% comfortable, 85% with work). The cheapest lever is
-not in the RTL: `FP_MACRO_HORIZONTAL_HALO`/`FP_MACRO_VERTICAL_HALO` are at
+**Measured on this branch** (run 35517898866, the full attract build plus this
+glyph): `design__instance__utilization` **0.8439**, 57.5k µm² of standard cells
+against the macro's 49.4k, and **368 sequential cells** — which is exactly the
+357 predicted above plus this glyph's 11, so the flop arithmetic is sound. No
+setup, hold or slew violations at any of the three corners, detailed route DRC
+0, antenna 0, LVS clean, and TT precheck all green.
+
+Note that 84.4% and the 86.4% above are *not* the same quantity, so don't read
+the difference as a saving: LibreLane's metric excludes the macro halo and
+includes 8.4k of fill cells against a ~136.7k denominator, where the hand
+figure puts the halo in the numerator over a 126.7k core. Compare CI run to CI
+run, or compare flop counts.
+
+**The hand figure is over budget** (80% comfortable, 85% with work) and the
+measured one sits just under the 85% line, so the halo trim below has not been
+needed yet. The cheapest lever is not in the RTL: `FP_MACRO_HORIZONTAL_HALO`/`FP_MACRO_VERTICAL_HALO` are at
 LibreLane's default of 10 µm and nothing in `src/config.json` sets them. The
 halo ring around a 336.46 x 146.88 µm macro is 10.1k µm², 7.9 points of
 utilisation; halving it to 5 gives back 5.1k, about 4 points. The risk is
