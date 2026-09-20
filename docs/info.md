@@ -41,8 +41,9 @@ is a product of the frame number: each is an accumulator, and what varies is the
 amount added per frame. A speed can therefore change without the picture ever
 jumping — the ring speed wanders between slightly reversed, through stopped, to 3x
 over a 2.3 minute round trip, and the drift speed between 0.5x and 1.4x over 4.5
-minutes. The palette changes itself every 512 frames
-(~8.5 s), fading through black across the change so it is a dip rather than a cut.
+minutes. The palette changes itself every 1024 frames
+(~17 s), taking a second to fade through black either side of the change so it
+is a dip rather than a cut.
 
 `ui_in[6:1]` are read as live DIP switches while the generator is drawing, since
 nothing else is using those pins then. All off is the behaviour above:
@@ -50,7 +51,7 @@ nothing else is using those pins then. All off is the behaviour above:
 | Bit | Off | On |
 |---|---|---|
 | `ui_in[3:1]` | starting palette (also the reset strap) | the palette held in manual mode |
-| `ui_in[4]` | change palette every 512 frames | hold the palette `ui_in[3:1]` names |
+| `ui_in[4]` | change palette every 1024 frames (~17 s) | hold the palette `ui_in[3:1]` names |
 | `ui_in[5]` | ring speed wanders | steady ring speed |
 | `ui_in[6]` | drift speed wanders | steady drift |
 
@@ -84,7 +85,7 @@ and write are never asserted together — which is what allows a single port mac
 
 **With no external data.** Leave `uio[7]` low, apply a 40 MHz clock and release
 reset. You should get a zone plate drawn across the 64x37 grid: concentric rings
-that tighten outward and flow slowly, with the palette changing every ~8.5 s through
+that tighten outward and flow slowly, with the palette changing every ~17 s through
 a fade to black. That exercises all 16 brightness levels, all 7 lit segments, the
 whole grid and the palette without anything driving the input pins. Then flip
 `ui_in[6:1]` — each switch in the table above should change what you see within

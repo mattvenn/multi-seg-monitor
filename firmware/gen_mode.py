@@ -78,8 +78,8 @@ def main(pmod_type=1, palette=3, cycle=True, curve=None):
     PmodVGA, 1=Tiny VGA; palette 0-7 selects one of the chip's built-in
     presets (tools/palette_builder/presets.json) to start from.
 
-    `cycle` (the chip's own default) steps through all 8 presets every 512
-    frames, about 8.5 s, fading through black across each change. `curve`
+    `cycle` (the chip's own default) steps through all 8 presets every 1024
+    frames, about 17 s, fading through black across each change. `curve`
     loads a custom palette instead, as three (x1, y1, x2, y2) point pairs for
     R, G, B -- palette_builder's Export prints a ready-made call; it always
     switches cycling off, because the next cycle step would overwrite it.

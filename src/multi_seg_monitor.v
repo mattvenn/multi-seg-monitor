@@ -217,7 +217,7 @@ module multi_seg_monitor (
     reg        gen_busy;
     // 14 bits: the zone plate's source paths wrap at 2^16 of t * {24, 16,
     // 20}, so the whole picture repeats every 2^14 frames (4.5 minutes) and a
-    // wider counter would change nothing. The low 9 bits drive the palette
+    // wider counter would change nothing. The low 10 bits drive the palette
     // cycle and its fade, and the top bits shape the zone plate's two rate
     // waves (see src/zoneplate.v).
     reg [13:0] frame_ctr;
@@ -232,13 +232,17 @@ module multi_seg_monitor (
 
     // Fade through black around the automatic palette change, so a change is
     // a dip rather than a cut. Purely combinational off the frame counter --
-    // 32 frames down, 32 up, either side of the wrap, full brightness for the
-    // 448 in between -- so it costs no state of its own. It is applied to the
+    // 64 frames down, 64 up, either side of the wrap, full brightness for the
+    // 896 in between -- so it costs no state of its own. It is applied to the
     // generator's picture only, and only while the palette is changing
     // itself: a host that has taken the palette over never sees a dip.
-    wire [8:0] fade_k   = frame_ctr[8:0];
-    wire [3:0] fade_lvl = fade_k < 9'd32   ? fade_k[4:1] :
-                          fade_k >= 9'd480 ? 4'd15 - fade_k[4:1] : 4'd15;
+    //
+    // Four frames a level, not two: a 16-step fade at 60 Hz is short enough
+    // to read as a staircase rather than a dip, and the whole point is that
+    // the change is not noticed happening.
+    wire [9:0] fade_k   = frame_ctr[9:0];
+    wire [3:0] fade_lvl = fade_k < 10'd64   ? fade_k[5:2] :
+                          fade_k >= 10'd960 ? 4'd15 - fade_k[5:2] : 4'd15;
 
     // Registered, not wired straight into the zone plate. The level changes
     // once a frame, but as a wire it put frame_ctr's two comparators in
@@ -274,7 +278,7 @@ module multi_seg_monitor (
         end else begin
             // frame_ctr advances on frame_start, so it still reads the old
             // count here: this is the last frame of the 512, not the first.
-            frame_wrap    <= frame_start && frame_ctr[8:0] == 9'h1FF;
+            frame_wrap    <= frame_start && frame_ctr[9:0] == 10'h3FF;
             // Likewise the switch sampling. It is a debounce over whole
             // frames, so a cycle either way means nothing to it, and keeping
             // it off frame_start keeps that net's fanout down.
@@ -291,13 +295,13 @@ module multi_seg_monitor (
             gen_ptr   <= 0;
             gen_buf   <= 2'd0;
             gen_busy  <= 0;
-            // 32, not 0: gen_fade below holds the first 32 frames of every
-            // 512 at a fade-in, and power-up must not land in one. The
+            // 64, not 0: gen_fade below holds the first 64 frames of every
+            // 1024 at a fade-in, and power-up must not land in one. The
             // bring-up picture would come up dim, and the gold and
             // gate-level captures -- taken a handful of frames after reset,
             // and checking the lit fraction and that all 16 DAC codes appear
             // -- would be measuring a fade rather than the picture.
-            frame_ctr <= 14'd32;
+            frame_ctr <= 14'd64;
             vsync_d   <= 1'b1;
         end else begin
             vsync_d <= vga_vsync;

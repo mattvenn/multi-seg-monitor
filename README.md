@@ -152,7 +152,7 @@ All off is the default attract mode:
 | Bit | Off (default) | On |
 |---|---|---|
 | `ui_in[3:1]` | the starting palette (reset strap) | the palette held in manual mode |
-| `ui_in[4]` | palette changes every 512 frames (~8.5 s), fading through black | hold the palette `ui_in[3:1]` names |
+| `ui_in[4]` | palette changes every 1024 frames (~17 s), fading through black | hold the palette `ui_in[3:1]` names |
 | `ui_in[5]` | the rings' flow speed wanders | steady flow |
 | `ui_in[6]` | the sources' drift speed wanders | steady drift |
 | `ui_in[7]` | spare | spare |
@@ -186,7 +186,7 @@ starts a new packet:
 
 A header alone is enough to change the Pmod or turn preset cycling on or off;
 `load_preset` puts the strapped preset back. The generator steps to the next
-preset every 512 frames (~8.5 s), fading through black across the change, until
+preset every 1024 frames (~17 s), fading through black across the change, until
 a packet or the manual switch turns cycling off. A valid header also hands the
 `ui_in` switches to the host for good, as above. `firmware/`'s
 `main(curve=...)` sends one for you; `tools/segments.py`'s `config_packet()`
@@ -195,7 +195,7 @@ builds one from Python, and `tools/palette_builder` exports the exact bytes.
 **1. Internal generator, no firmware.** Leave `uio[7]` low and the design ignores the
 stream port entirely. You should get a zone plate drawn across the 64x37 grid:
 concentric rings that tighten outward and flow slowly, with the palette changing
-every ~8.5 s through a fade to black. Compare against `test/gold/generator.png`,
+every ~17 s through a fade to black. Compare against `test/gold/generator.png`,
 which is the same thing from simulation, a few frames after reset.
 
 The chip has no pull on `uio[7]`, so what the demoboard does with that pin at
@@ -303,7 +303,7 @@ both take the choice as arguments to `main()`:
 | `pmod_type` | 0 = Digilent PmodVGA, 1 = Tiny VGA Pmod |
 | `palette` | 0 grey, 1 blue, 2 green, 3 purple, 4 amber, 5 red, 6 cyan, 7 fire |
 | `curve` | optional custom palette, overriding `palette`: three `(x1, y1, x2, y2)` point pairs for R, G, B, as `tools/palette_builder`'s Export prints |
-| `cycle` | `gen_mode.py` only: `True` (the default) steps through all 8 presets every ~8.5 s |
+| `cycle` | `gen_mode.py` only: `True` (the default) steps through all 8 presets every ~17 s |
 
 `mpremote run firmware/seg_player.py` calls `main()` with its defaults, so to choose,
 copy the file across once and call it yourself:

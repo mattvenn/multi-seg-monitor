@@ -50,7 +50,7 @@
 //    applied setting stays in force after that.
 //
 // With cycle_en set (its reset value), the generator steps through the
-// presets every 512 frames, about 8.5 s, fading through black across the
+// presets every 1024 frames, about 17 s, fading through black across the
 // change (the fade itself is in multi_seg_monitor.v, applied by zoneplate.v)
 // -- the bring-up picture shows all of them with no host at all. Any valid
 // header sets cycle_en from its own bit, so a host that loads a palette turns
@@ -99,7 +99,7 @@ module config_port (
     // so a host that later takes over still gets the cycling it asked for.
     assign auto_pal = cycle_en && !(dip_live && manual);
     // Skipped, not deferred, if a config byte lands on the same cycle -- one
-    // missed step in an 8 s cycle is invisible, a lost config byte isn't.
+    // missed step in a 17 s cycle is invisible, a lost config byte isn't.
     wire cycle_tick = auto_pal && !stream_mode && frame_wrap && !cfg_stb;
     // Manual mode chases the switches: a level, not an edge, so it needs no
     // flop of its own and settles the cycle after the switches are applied.

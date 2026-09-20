@@ -310,7 +310,7 @@ def zoneplate_frame(frame, ring_shift=13, drift=4, phase_speed=4, sources=2):
 RING_MASK = (1 << 9) - 1     # src/zoneplate.v ring_ph: 7 integer + 2 fraction
 T_SRC_MASK = (1 << 17) - 1   # t_src: 14 integer + 3 fraction
 FRAME_MASK = (1 << 14) - 1   # multi_seg_monitor.v frame_ctr
-CHIP_RESET_FRAME = 32        # ...and its reset value, clear of the fade-in
+CHIP_RESET_FRAME = 64        # ...and its reset value, clear of the fade-in
 
 
 def chip_rates(frame_ctr, vary_phase=1, vary_drift=1):
@@ -335,16 +335,17 @@ def chip_step(state, frame_ctr, vary_phase=1, vary_drift=1):
 
 def chip_fade(frame_ctr, auto=1):
     """The fade level 0..15 for the frame showing `frame_ctr`. The automatic
-    palette change happens as frame_ctr[8:0] wraps, with 32 frames of fade
-    either side of it, so the change itself lands in black. `auto` off -- a
-    host holding the palette, or manual mode -- means no fade at all."""
+    palette change happens as frame_ctr[9:0] wraps, with 64 frames of fade
+    either side of it -- four frames a level -- so the change itself lands in
+    black. `auto` off -- a host holding the palette, or manual mode -- means
+    no fade at all."""
     if not auto:
         return 15
-    k = frame_ctr & 0x1FF
-    if k < 32:
-        return k >> 1
-    if k >= 480:
-        return (511 - k) >> 1
+    k = frame_ctr & 0x3FF
+    if k < 64:
+        return k >> 2
+    if k >= 960:
+        return (1023 - k) >> 2
     return 15
 
 
@@ -371,33 +372,38 @@ def chip_preset(frame, palette=0, manual=0, **_):
     after reset.
 
     Manual mode holds the one the switches name. Otherwise it steps every time
-    frame_ctr's low 9 bits wrap, starting from `palette` -- which is the same
+    frame_ctr's low 10 bits wrap, starting from `palette` -- which is the same
     ui_in[3:1] field the reset strap uses, so a board set up by switches alone
     agrees with itself. The step happens on the frame_start that ends frame
-    511, so frame 511 still shows the old palette and 512 shows the new one:
-    both are at fade level 0, which is the point."""
+    1023, so frame 1023 still shows the old palette and 1024 shows the new
+    one: both are at fade level 0, which is the point."""
     if manual:
         return palette & 7
-    return (palette + ((CHIP_RESET_FRAME + frame) >> 9)) & 7
+    return (palette + ((CHIP_RESET_FRAME + frame) >> 10)) & 7
 
 
-def chip_frame(frame, palette=0, manual=0, vary_phase=1, vary_drift=1):
-    """The picture the chip draws `frame` frames after reset. `palette` is
-    not used here -- it only picks a colour, which the caller applies, via
-    chip_preset() -- but it is taken so a whole switch setting can be passed
-    through as one **params."""
+def chip_frame(frame, palette=0, manual=0, steady_phase=0, steady_drift=0):
+    """The picture the chip draws `frame` frames after reset.
+
+    The arguments are the DIP switch bits themselves, so every one of them is
+    0 on a board with every switch off -- which is the full attract mode. The
+    two speed switches are therefore "steady", the inverse of the vary_phase
+    and vary_drift the RTL and chip_step() carry; the inversion lives here and
+    nowhere else. `palette` only picks a colour, which the caller applies via
+    chip_preset(), but it is taken so a whole switch setting passes through as
+    one **params."""
     del palette
-    frame_ctr, ring_ph, t_src = chip_state(frame, vary_phase, vary_drift)
+    frame_ctr, ring_ph, t_src = chip_state(frame, not steady_phase, not steady_drift)
     return zoneplate_at(t_src >> 3, ring_ph >> 2, chip_fade(frame_ctr, not manual))
 
 
-# The four fields of the chip's DIP switches (src/config_port.v), all at the
-# setting a board with every switch off comes up in.
+# The four fields of the chip's DIP switches (src/config_port.v), in the pins'
+# own polarity: all zero is every switch off, which is the full attract mode.
 CHIP_PARAMS = [
     ("palette", 0, 7, 0, "ui_in[3:1]: the palette to hold, or where the automatic change starts"),
-    ("manual", 0, 1, 0, "ui_in[4]: 1 = hold that palette, 0 = change every 512 frames through a fade"),
-    ("vary_phase", 0, 1, 1, "ui_in[5] off: let the ring speed wander"),
-    ("vary_drift", 0, 1, 1, "ui_in[6] off: let the source drift speed wander"),
+    ("manual", 0, 1, 0, "ui_in[4]: 1 = hold that palette, 0 = change every 1024 frames through a fade"),
+    ("steady_phase", 0, 1, 0, "ui_in[5]: 1 = fixed ring speed, 0 = let it wander"),
+    ("steady_drift", 0, 1, 0, "ui_in[6]: 1 = fixed source drift, 0 = let it wander"),
 ]
 
 

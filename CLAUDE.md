@@ -123,7 +123,8 @@ drawn. Everything below follows from that.
   config packet instead of pixels — Pmod type, preset cycling, and a palette
   curve — and `ui_in[6:1]` are read as live DIP switches. Byte layout, switch
   map and the `dip_live` host-takeover latch are in that file's header and
-  `README.md`. The header's magic nibble (`0xA`) is what stops a floating strobe
+  `README.md`. The palette changes itself every 1024 frames (~17 s) with a
+  64-frame fade through black either side of the change. The header's magic nibble (`0xA`) is what stops a floating strobe
   on a bare board flipping the Pmod. `formal/config_port.sby` proves the protocol
   on this module alone, switches included.
 - **Palette** (`palette.v`) is three per-channel curves, not a table: two lines

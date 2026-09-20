@@ -312,7 +312,7 @@ async def test_motion_registers_step_like_the_model(dut):
 
     # 0x0FF/0x100 straddle a ring-rate step, 0x3FF/0x400 a drift-rate step,
     # and 0x1FFF is the last frame before the whole picture repeats.
-    cases = [(0x0020, 0, 0), (0x00FF, 1, 1), (0x0100, 1, 1),
+    cases = [(0x0040, 0, 0), (0x00FF, 1, 1), (0x0100, 1, 1),
              (0x03FF, 0, 1), (0x0400, 1, 0), (0x1FFF, 0, 0)]
     for frame_ctr, vary_phase, vary_drift in cases:
         # dip_a is ui_in[6:1], so bit 4 is ui_in[5] and bit 5 is ui_in[6];
@@ -792,14 +792,14 @@ async def test_config_packet_sets_pmod_and_reloads_preset(dut):
 
 @rtl_only
 async def test_generator_cycles_through_presets(dut):
-    """With no host, the generator steps to the next preset every 512
-    frames. frame_ctr is poked to 511 rather than waiting 512 frames out."""
+    """With no host, the generator steps to the next preset every 1024
+    frames. frame_ctr is poked to 1023 rather than waiting 1024 frames out."""
     cocotb.start_soon(Clock(dut.clk, CLK_PS, unit="ps").start())
     await reset(dut, strap=0b1110)  # Digilent, preset 7: also checks the wrap to 0
 
     import attract_proto
 
-    dut.user_project.core.frame_ctr.value = 0x1FF
+    dut.user_project.core.frame_ctr.value = 0x3FF
     await FallingEdge(dut.vs)
     await ClockCycles(dut.clk, 4)
     assert int(dut.user_project.core.preset_idx.value) == 0
@@ -808,9 +808,9 @@ async def test_generator_cycles_through_presets(dut):
     )
 
     # attract_proto.chip_preset() is what palette_builder colours the `chip`
-    # effect with, so it has to wrap where the chip does. frame_ctr is 0x200
+    # effect with, so it has to wrap where the chip does. frame_ctr is 0x400
     # by now, which is one step on from the strapped 7.
-    assert attract_proto.chip_preset(0x200 - attract_proto.CHIP_RESET_FRAME, palette=7) == 0
+    assert attract_proto.chip_preset(0x400 - attract_proto.CHIP_RESET_FRAME, palette=7) == 0
 
 
 # --------------------------------------------------------------------------
@@ -891,7 +891,7 @@ async def test_fade_dims_the_frame_around_a_palette_change(dut):
     core = dut.user_project.core
 
     # Purely combinational off frame_ctr, so poking it is the whole test.
-    for k in (0, 1, 2, 15, 31, 32, 33, 240, 479, 480, 481, 496, 510, 511):
+    for k in (0, 1, 3, 4, 7, 63, 64, 65, 500, 959, 960, 963, 964, 1020, 1023):
         core.frame_ctr.value = k
         await ClockCycles(dut.clk, 2)
         assert int(core.gen_fade.value) == attract_proto.chip_fade(k), (
@@ -899,10 +899,10 @@ async def test_fade_dims_the_frame_around_a_palette_change(dut):
             f"model {attract_proto.chip_fade(k)}"
         )
 
-    # A dimmed frame, pixel for pixel. 500 puts the capture a few frames into
-    # the fade-out, well clear of both the full-brightness plateau and the
-    # black frames at the wrap.
-    core.frame_ctr.value = 0x1F4
+    # A dimmed frame, pixel for pixel. 990 puts the capture halfway down the
+    # fade-out, well clear of both the full-brightness plateau and the black
+    # frames at the wrap.
+    core.frame_ctr.value = 0x3DE
     await capture_frame(dut)
     shown = int(core.frame_ctr.value) - 1
     fade = attract_proto.chip_fade(shown)
@@ -925,7 +925,7 @@ async def test_fade_dims_the_frame_around_a_palette_change(dut):
     dut.ui_in.value = dip(palette=3, manual=True)
     await next_frame_start(dut)
     await next_frame_start(dut)
-    core.frame_ctr.value = 0x1F4
+    core.frame_ctr.value = 0x3DE
     await ClockCycles(dut.clk, 2)
     assert int(core.auto_pal.value) == 0
     assert int(core.gen_fade.value) == 15, "manual mode must never fade"
