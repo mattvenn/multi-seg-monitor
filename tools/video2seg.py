@@ -98,12 +98,22 @@ def main():
         help="decode exponent for the source; lower lifts the midtones",
     )
     ap.add_argument("--max-frames", type=int, default=0, help="0 for no limit")
+    ap.add_argument(
+        "--no-dp",
+        action="store_true",
+        help="write the decimal point nibble as 0 (always black)",
+    )
     args = ap.parse_args()
 
     count = 0
     with open(args.output, "wb") as out:
         for linear in decode(args.input, args.fps, args.gamma):
-            data = pack(frame_to_segments(linear))
+            intensity = frame_to_segments(linear)
+            if args.no_dp:
+                # Done here rather than in the player: the player only DMAs the
+                # file, and a per-byte mask there would eat into the pacing budget.
+                intensity[7] = 0
+            data = pack(intensity)
             assert len(data) == segments.FRAME_BYTES
             out.write(data)
             count += 1
