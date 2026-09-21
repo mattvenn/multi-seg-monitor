@@ -39,8 +39,8 @@ from machine import Pin
 
 # Edit these to change what the chip comes up as; main()'s arguments still
 # override them for a one-off call.
-PMOD_TYPE = 1  # 0 = Digilent PmodVGA, 1 = Tiny VGA
-PALETTE = 3  # 0-7, one of the chip's built-in presets
+PMOD_TYPE = 0  # 0 = Digilent PmodVGA, 1 = Tiny VGA
+PALETTE = 0  # 0-7, one of the chip's built-in presets
 
 # Demoboard GPIO map, from the tt-demo-pcb README.  ui_in is contiguous on
 # GPIO17-24, which is what lets the whole byte leave in a single PIO `out`.
