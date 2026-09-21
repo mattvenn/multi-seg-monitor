@@ -60,9 +60,9 @@ FRAME_BYTES = ROWS * ROW_BYTES  # 9472
 #   2. Brightness (r+g+b) never decreases with the index, so a brighter
 #      stored level never looks dimmer.
 #   3. Entries 1-15 are pairwise distinct. Grey must also differ from entry 0
-#      everywhere; the tinted presets deliberately set entry 1 to black too,
-#      so stored level 1 is indistinguishable from off in those (15 distinct
-#      levels, not 16) -- a designed dark floor, not a collision to fix.
+#      everywhere; a tinted preset may set entry 1 to black too (a designed
+#      dark floor: stored level 1 is then indistinguishable from off, 15
+#      distinct levels, not 16), or use all 16 -- either is legal.
 #
 # Deliberately NOT a rule: surviving Tiny VGA's 2-bit/channel truncation
 # (src/tt_um_multi_seg_monitor.v keeps each channel's top 2 bits). A smooth

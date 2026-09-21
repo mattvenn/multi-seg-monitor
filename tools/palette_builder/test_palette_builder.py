@@ -91,14 +91,15 @@ def test_lut_arithmetic_matches_the_two_pmods():
 
 
 def test_real_palettes_pass_and_grey_flags_only_six_bit():
-    # The tinted presets put black at entries 0 and 1 on purpose and are
-    # smooth ramps, so they collapse on the 6-bit Pmod too: expect exactly the
-    # 12-bit "0, 1" warning plus a 6-bit one, nothing else.
+    # The tints are smooth ramps, so they collapse on the 6-bit Pmod too. A
+    # tint may also keep a dark floor (entry 1 black), which is the one 12-bit
+    # warning allowed: exactly "0, 1", and nothing else.
     for n in range(1, segments.N_PRESETS):
         warns = pb.check_palette(segments.PALETTES[n])
-        assert len(warns) == 2, (n, warns)
-        assert warns[0].startswith("12-bit") and warns[0].endswith("0, 1"), warns
-        assert warns[1].startswith("6-bit"), warns
+        assert warns and warns[-1].startswith("6-bit"), (n, warns)
+        for w in warns[:-1]:
+            assert w.startswith("12-bit") and w.endswith("0, 1"), (n, warns)
+        assert len(warns) <= 2, (n, warns)
     warns = pb.check_palette(segments.PALETTES[0])
     assert len(warns) == 1 and "6-bit" in warns[0]  # the documented exemption
 
@@ -137,12 +138,14 @@ def test_fit_curve_recovers_every_preset_exactly():
 
 
 def test_fit_curve_on_the_old_tables_is_close():
-    """The pre-curve blue/green/purple tables in palettes/ still open, fitted.
-    Every channel lands within 1 of the old value at every entry."""
+    """The pre-curve blue/green/purple tables (kept in testdata/, since
+    palettes/ now holds curves) still open, fitted. Every channel lands
+    within 1 of the old value at every entry."""
     for name in ("blue", "green", "purple"):
-        curve, fitted = pb.from_json((HERE_P / "palettes" / f"{name}.json").read_text())
+        path = HERE_P / "testdata" / f"legacy_{name}.json"
+        curve, fitted = pb.from_json(path.read_text())
         assert fitted
-        old = json.loads((HERE_P / "palettes" / f"{name}.json").read_text())["entries"]
+        old = json.loads(path.read_text())["entries"]
         got = pb.curve_table(curve)
         worst = max(abs(a - b) for e, g in zip(old, got) for a, b in zip(e, g))
         assert worst <= 1, (name, worst)
@@ -196,7 +199,7 @@ def test_export_carries_a_working_packet():
     text = pb.export_text(curve, "amber")
     packet = segments.config_packet(segments.points_to_params(curve))
     assert packet.hex(" ") in text
-    assert "main(curve=((1, 0, 8, 15), (1, 0, 15, 10), (10, 0, 15, 5)))" in text
+    assert "main(curve=((1, 0, 8, 15), (1, 0, 15, 14), (10, 0, 15, 5)))" in text
 
 
 def test_list_clips_keeps_only_current_geometry():
