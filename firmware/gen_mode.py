@@ -27,7 +27,7 @@ from machine import Pin
 
 # Edit these to change what the chip comes up as; main()'s arguments still
 # override them for a one-off call.
-PMOD_TYPE = 1  # 0 = Digilent PmodVGA, 1 = Tiny VGA
+PMOD_TYPE = 0  # 0 = Digilent PmodVGA, 1 = Tiny VGA
 PALETTE = 3  # 0-7, one of the chip's built-in presets
 
 MODE = 32  # uio[7] -- 1 selects streamed data, 0 the internal generator
