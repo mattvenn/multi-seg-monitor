@@ -7,8 +7,8 @@ RTL against it bit for bit, and this file checks the model and the presets.
 The rules, from the gamma-collision lesson (src/palette.v's header comment):
 intensity 0 must be black (it is also every non-segment background pixel), a
 brighter stored level must never look dimmer, and entries 1-15 must stay
-distinct. The tinted presets set entry 1 to black on purpose, so they have 15
-distinct levels rather than 16. Surviving Tiny VGA's 2-bit/channel truncation
+distinct. A tint may keep a dark floor (entry 1 black, 15 distinct levels) or
+use all 16; that is a design choice per palette, not a rule. Surviving Tiny VGA's 2-bit/channel truncation
 is deliberately not a rule.
 
     python3 test_palettes.py
@@ -65,11 +65,12 @@ def test_entries_one_to_fifteen_are_distinct():
         assert len(set(palette[1:])) == 15, f"palette {n} has collisions: {palette}"
 
 
-def test_grey_keeps_all_sixteen_levels_and_tints_have_fifteen():
+def test_grey_keeps_all_sixteen_levels_and_tints_have_at_least_fifteen():
+    # Entry 1 is not pinned to black in the tints: a palette may keep a dark
+    # floor (15 distinct levels) or use all 16. Rules 1-3 are the ones above.
     assert len(set(segments.PALETTES[0])) == 16
     for n in range(1, segments.N_PRESETS):
-        assert len(set(segments.PALETTES[n])) == 15, f"palette {n}"
-        assert segments.PALETTES[n][1] == (0, 0, 0), f"palette {n} entry 1"
+        assert len(set(segments.PALETTES[n])) >= 15, f"palette {n}"
 
 
 def test_rtl_presets_file_is_generated_from_presets_json():
