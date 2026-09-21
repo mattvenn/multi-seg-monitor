@@ -10,7 +10,7 @@ You can also include images in this folder and reference them in the markdown. E
 ## How it works
 
 Instead of building a wall out of hundreds of 7 segment displays, this simulates one
-on a VGA screen: a **53 x 27 grid of digits — 1431 digits, 11448 segments** — each
+on a VGA screen: a **53 x 27 grid of digits — 1431 digits, 10017 segments** — each
 segment with its own 4 bit brightness, sent through a colour palette on the way out.
 
 There is no framebuffer. The chip races the beam and keeps only the digit row it is

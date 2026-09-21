@@ -29,7 +29,7 @@ def render(frame, levels, palette=0):
         for col in range(segments.COLS):
             off = segments.digit_offset(col, row)
             intensity = segments.unpack_digit(frame[off : off + 4])
-            for seg in range(8):
+            for seg in range(segments.NUM_SEGMENTS):  # nibble 7 is reserved
                 code = intensity[seg]
                 r, g, b = segments.PALETTES[palette][code]  # no gamma stage
                 if levels == 4:

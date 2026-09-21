@@ -303,7 +303,7 @@ def test_effect_index_image_matches_attract_proto():
             idx = pb.index_image_from_effect(name, frame, params)
             ref = attract_proto.sample(attract_proto.EFFECTS[name](frame, **params), per_digit=False)
             for _ in range(200):
-                row, col, seg = rng.randrange(segments.ROWS), rng.randrange(segments.COLS), rng.randrange(8)
+                row, col, seg = rng.randrange(segments.ROWS), rng.randrange(segments.COLS), rng.randrange(segments.NUM_SEGMENTS)
                 x, y = segments.segment_centre(col, row, seg)
                 assert idx[y, x] == ref[row][col][seg], (name, params, row, col, seg)
             assert idx.max() <= 15
@@ -439,8 +439,7 @@ def test_every_setting_is_one_the_prefetch_can_draw():
         # choice, and on a narrow body the cheapest predicate is the one that
         # names the left rail rather than the right.
         lit = {frozenset((names[s0], names[s1])) for _y0, _y1, s0, s1 in bands if s0 is not None}
-        want = {frozenset(p) for p in (("a",), ("f", "b"), ("g",), ("e", "c"),
-                                       ("d", "DP") if len(cell) == 8 else ("d",))}
+        want = {frozenset(p) for p in (("a",), ("f", "b"), ("g",), ("e", "c"), ("d",))}
         assert lit == want, (params, lit)
         # One sample point each, or two nibbles would track the same level.
         pts = [cell.sample(s) for s in range(len(cell)) if not cell.is_dark(s)]
@@ -524,11 +523,9 @@ def test_the_gaps_are_the_distance_between_digits():
     rng = random.Random(14)
     for params in _sample_params(rng, 8):
         cell = shapes.digit(**params)
-        # Every nibble lit except the decimal point, which sits in the gap.
-        frame = bytearray(b"\xff" * cell.frame_bytes)
-        for digit in range(cell.digits):
-            frame[digit * 4 + 3] = 0x0F  # byte 3 is {DP, g}: keep g, drop DP
-        idx = pb.index_image_from_frame(bytes(frame), cell)
+        # Every nibble lit, the reserved one included: it has no segment to draw.
+        frame = b"\xff" * cell.frame_bytes
+        idx = pb.index_image_from_frame(frame, cell)
         if cell.cols < 3 or cell.rows < 3:
             continue
         # A horizontal cut through the upper rails, a vertical one through the
@@ -597,10 +594,12 @@ def test_validate_rejects_a_cell_the_prefetch_could_not_draw():
         # Legal row by row, but the two rows want opposite predicates, and the
         # slot select is shared by every row.
         "no_one_predicate": [(0, 3, 0, 1), (4, 11, 0, 1), (0, 7, 4, 5), (8, 11, 4, 5)],
-        # A pair that shares a scanline *and* a column: no predicate can tell
-        # the two apart, whatever the cell size.
-        "same_columns": [(0, 3, 0, 1), (4, 7, 0, 1), (0, 3, 2, 3), (4, 7, 2, 3),
-                         (0, 7, 4, 5), (4, 7, 6, 7), (0, 3, 6, 7), (2, 5, 8, 9)],
+        # Two scanline pairs, (a, b) on rows 0-1 and (c, d) on rows 2-3, where c
+        # spans columns a and b both occupy (3 is a's, 4-5 are b's). Segments
+        # sharing a column must sit on the same side of the cx predicate, and a
+        # and b are a pair that must sit on opposite sides: no predicate can do
+        # both, whatever the cell size.
+        "same_columns": [(0, 3, 0, 1), (4, 7, 0, 1), (3, 5, 2, 3), (8, 9, 2, 3)],
         "outside_the_cell": [(-1, 3, 0, 1)],
         "too_many": [(0, 0, r, r) for r in range(9)],
     }
@@ -623,12 +622,13 @@ def test_the_default_proportions_are_the_chips_own_geometry():
 
     cell = shapes.CHIP
     assert cell.params == shapes.DEFAULTS
-    assert len(cell) == 8
+    assert len(cell) == segments.NUM_SEGMENTS == 7
     for seg, (name, x0, x1, y0, y1) in enumerate(segments.SEGMENTS):
         assert cell.rect(seg) == (x0, x1, y0, y1), name
         assert cell.pixels(3, 5, seg) == segments.segment_pixels(3, 5, seg), name
         assert cell.sample(seg) == (attract_proto.SEG_CX[seg], attract_proto.SEG_CY[seg]), name
-    assert cell.is_dark(7) and not any(cell.is_dark(s) for s in range(7))  # DP
+    # Nibble 7 is reserved: nothing to light. Every real segment is lit.
+    assert cell.is_dark(7) and not any(cell.is_dark(s) for s in range(7))
 
     rtl = (Path(__file__).resolve().parents[2] / "src" / "zoneplate.v").read_text()
     table = {int(n): (int(ox), int(oy)) for n, ox, oy in
@@ -651,10 +651,9 @@ def test_warnings_name_the_costs_and_not_the_ratios():
     import shapes
 
     touching = shapes.digit(gap_x=0)
-    assert len(touching) == 7  # no gap column, so no decimal point
+    assert len(touching) == 7
     assert any("mesh" in m for m in shapes.warnings(touching))
-    assert any("nibble 7" in m for m in shapes.warnings(touching))
-    assert any("touches the next digit" in m for m in shapes.warnings(shapes.digit(gap_x=1)))
+    assert shapes.warnings(shapes.digit(gap_x=1)) == []  # one gap column is enough now
     assert any("run together" in m for m in shapes.warnings(shapes.digit(gap_y=0)))
 
     # Neither a fractional byte period nor an odd cell height is a complaint.
@@ -711,8 +710,8 @@ def test_a_frame_for_another_grid_is_refused_rather_than_drawn_as_noise():
 
 def test_effect_index_image_follows_the_sample_points():
     """The level a segment shows is the effect at that segment's sample point
-    -- the one pixel of it the zone plate decides -- and the decimal point
-    stays dark whether or not the cell has room for one."""
+    -- the one pixel of it the zone plate decides -- and the reserved nibble
+    stays dark."""
     import attract_proto
     import shapes
 

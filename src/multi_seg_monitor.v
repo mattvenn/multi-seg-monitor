@@ -143,25 +143,24 @@ module multi_seg_monitor (
     // and two rows are what stop a digit's right rail merging into its
     // neighbour's left rail, and one row's bottom bar merging into the next
     // row's top bar -- without them the grid reads as a mesh rather than as
-    // digits.  The decimal point lives in the first spare column, which is
-    // where a real display puts it.
+    // digits.
     wire xz_left  = (cx < 4);                   // f, e
     wire xz_mid   = (cx >= 4)  && (cx < 9);     // a, g, d
-    wire xz_right = (cx >= 9)  && (cx < 13);    // b, c
-    wire xz_dp    = (cx == 13);                 // DP, cx == 14 is the gap
+    wire xz_right = (cx >= 9)  && (cx < 13);    // b, c; cx 13, 14 is the gap
 
     wire yz_top   = (cy < 4);                   // a
     wire yz_up    = (cy >= 4)  && (cy < 8);     // f, b
     wire yz_mid   = (cy >= 8)  && (cy < 12);    // g
     wire yz_low   = (cy >= 12) && (cy < 16);    // e, c
-    wire yz_bot   = (cy >= 16) && (cy < 20);    // d, DP; cy 20,21 is the gap
+    wire yz_bot   = (cy >= 16) && (cy < 20);    // d; cy 20,21 is the gap
 
     // Every segment sits in exactly one y zone, and no y zone crosses more than
-    // two segments, so a scanline only ever shows two of a digit's eight
-    // nibbles. The prefetch fetches just those two, into two slots: slot 0 for
+    // two segments, so a scanline only ever shows two of a digit's seven
+    // segments. The prefetch fetches just those two, into two slots: slot 0 for
     // the segment in the left or middle x zone, slot 1 for the one in the
-    // right or DP zone. Segment numbers are the nibble order (a = 0 ... DP =
-    // 7), so segment k is byte k[2:1], high nibble if k[0].
+    // right zone. Segment numbers are the nibble order (a = 0 ... g = 6;
+    // nibble 7 is reserved and never displayed), so segment k is byte k[2:1],
+    // high nibble if k[0].
     reg [2:0] slot0_seg, slot1_seg;
 
     always @* begin
@@ -170,7 +169,10 @@ module multi_seg_monitor (
             yz_up:   {slot0_seg, slot1_seg} = {3'd5, 3'd1};  // f, b
             yz_mid:  {slot0_seg, slot1_seg} = {3'd6, 3'd0};  // g, -
             yz_low:  {slot0_seg, slot1_seg} = {3'd4, 3'd2};  // e, c
-            yz_bot:  {slot0_seg, slot1_seg} = {3'd3, 3'd7};  // d, DP
+            // d, and slot 1 reads the reserved nibble: nothing sits at cx 9..12
+            // down here, so it is fetched (the prefetch timing doesn't change)
+            // and never shown.
+            yz_bot:  {slot0_seg, slot1_seg} = {3'd3, 3'd7};
             default: {slot0_seg, slot1_seg} = {3'd0, 3'd0};  // gap rows
         endcase
     end
@@ -257,8 +259,8 @@ module multi_seg_monitor (
     // Draws a moving zone plate (zoneplate.v) into every one of the 1431
     // digits, with no external data: the picture a bare board shows, and the
     // silicon bring-up safety net. It replaced a scrolling hex test pattern;
-    // the zone plate still sweeps all 15 lit codes across the screen, but the
-    // decimal point is always dark in this mode.
+    // the zone plate still sweeps all 15 lit codes across the screen, and the
+    // reserved nibble is always 0 in this mode.
     //
     // Row N+1 is built while row N is on screen, into the buffer half that is not
     // being read. Each byte waits for the zone plate to compute it (~12 cycles)
@@ -485,10 +487,9 @@ module multi_seg_monitor (
                    (xz_mid   & yz_bot) |   // d
                    (xz_left  & yz_low) |   // e
                    (xz_left  & yz_up ) |   // f
-                   (xz_mid   & yz_mid) |   // g
-                   (xz_dp    & yz_bot);    // DP
+                   (xz_mid   & yz_mid);    // g
 
-    wire [3:0] seg_int = (xz_right | xz_dp) ? cur_digit[7:4] : cur_digit[3:0];
+    wire [3:0] seg_int = xz_right ? cur_digit[7:4] : cur_digit[3:0];
     wire       visible = seg_hit && cell_x && cell_y;
 
     // Colour comes from a selectable palette rather than a single grey value
@@ -560,7 +561,7 @@ module multi_seg_monitor (
 `endif
 
 `ifdef FORMAL_ZONE
-    // At most one of the 8 segment zones may claim a given (cx, cy): if two
+    // At most one of the 7 segment zones may claim a given (cx, cy): if two
     // ever overlapped, the case(1'b1) priority-encoder would silently pick
     // one and the other segment just wouldn't render there. This is what
     // keeps the spare column/row load-bearing rather than cosmetic
@@ -570,7 +571,7 @@ module multi_seg_monitor (
         assert ($countones({xz_mid  & yz_top, xz_right & yz_up,
                              xz_right & yz_low, xz_mid  & yz_bot,
                              xz_left & yz_low,  xz_left & yz_up,
-                             xz_mid  & yz_mid,  xz_dp   & yz_bot}) <= 1);
+                             xz_mid  & yz_mid}) <= 1);
 `endif
 
 `ifdef FORMAL_BUF

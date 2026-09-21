@@ -12,9 +12,12 @@ import numpy as np
 import segments
 import video2seg
 
+RESERVED = segments.NUM_SEGMENTS  # nibble 7: no segment, so always 0
+
 
 def test_uniform_cells():
-    """A cell filled with one value gives every segment that value."""
+    """A cell filled with one value gives every segment that value, and the
+    reserved nibble stays 0."""
     linear = np.zeros((segments.GRID_H, segments.GRID_W))
     for row in range(segments.ROWS):
         for col in range(segments.COLS):
@@ -26,17 +29,16 @@ def test_uniform_cells():
     got = video2seg.frame_to_segments(linear)
     for row in range(segments.ROWS):
         for col in range(segments.COLS):
-            want = (col * 7 + row * 3) % 16
             for seg in range(8):
+                want = 0 if seg == RESERVED else (col * 7 + row * 3) % 16
                 assert got[seg, row, col] == want, (
-                    f"segment {segments.SEGMENTS[seg][0]} of ({col}, {row}): "
-                    f"got {got[seg, row, col]}, want {want}"
+                    f"nibble {seg} of ({col}, {row}): got {got[seg, row, col]}, want {want}"
                 )
 
 
 def test_segment_isolation():
     """Light one segment's rectangle and only that segment should respond."""
-    for target in range(8):
+    for target in range(segments.NUM_SEGMENTS):
         linear = np.zeros((segments.GRID_H, segments.GRID_W))
         x0, x1, y0, y1 = segments.segment_pixels(0, 0, target)
         # segment_pixels includes the left/top margin; the converter works on
@@ -50,9 +52,19 @@ def test_segment_isolation():
         for seg in range(8):
             want = 15 if seg == target else 0
             assert got[seg, 0, 0] == want, (
-                f"lit {segments.SEGMENTS[target][0]}, "
-                f"{segments.SEGMENTS[seg][0]} read {got[seg, 0, 0]}, want {want}"
+                f"lit {segments.SEGMENTS[target][0]}, nibble {seg} read "
+                f"{got[seg, 0, 0]}, want {want}"
             )
+
+
+def test_the_old_decimal_point_position_reads_nowhere():
+    """The pixels where the decimal point used to be -- a dot in the first gap
+    column, cx 13, cy 16-19 -- belong to no segment now, so lighting them must
+    move nothing."""
+    linear = np.zeros((segments.GRID_H, segments.GRID_W))
+    linear[16:20, 13] = 1.0
+    got = video2seg.frame_to_segments(linear)
+    assert not got.any(), "something still samples the old decimal point position"
 
 
 def test_pack_round_trip():

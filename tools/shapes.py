@@ -52,15 +52,14 @@ has to feed them, so grid() reports that too:
     reports the period and the byte rate so the PIO divider can be set.
 
 The gaps are load bearing too: at gap_x 0 a digit's right rail touches its
-neighbour's left rail and the grid reads as a mesh rather than as digits, and
-the decimal point lives in the first gap column, so a digit with no gap hasn't
-got one.  warnings() says so.
+neighbour's left rail and the grid reads as a mesh rather than as digits.
+warnings() says so.
 
 What makes a variant *buildable* is a different question, and validate() is
 that rule.  The renderer prefetches exactly two nibbles per digit per scanline,
 into slot 0 and slot 1 (src/multi_seg_monitor.v, "Line buffer and prefetch"),
 and picks between them with one function of cx shared by every row:
-`seg_int = (xz_right | xz_dp) ? cur_digit[7:4] : cur_digit[3:0]`.  So a cell is
+`seg_int = xz_right ? cur_digit[7:4] : cur_digit[3:0]`.  So a cell is
 legal when:
 
   1. it has at most 8 segments (a digit is 4 bytes), each a rectangle inside
@@ -76,7 +75,7 @@ legal when:
      both slots today.
 
 The 7 segment topology holds all four at any proportions (a alone, then f and
-b, then g, then e and c, then d and DP), so validate() is here to prove a
+b, then g, then e and c, then d alone), so validate() is here to prove a
 variant rather than to reject one -- and to hand back what the RTL would need
 to draw it: the cx predicate, and the cy -> (slot0, slot1) band table that is
 the case in slot0_seg/slot1_seg.
@@ -111,9 +110,12 @@ RANGES = {key: (lo, hi) for key, lo, hi, _d, _h in PARAMS}
 
 
 class Shape:
-    """One cell: up to 8 segments, each an inclusive (x0, x1, y0, y1)
-    rectangle in cell coordinates, in the nibble order a, b, c, d, e, f, g, DP.
-    A cell with no gap to put the decimal point in simply has 7.
+    """One cell: the seven segments, each an inclusive (x0, x1, y0, y1)
+    rectangle in cell coordinates, in the nibble order a, b, c, d, e, f, g.
+    Nibble 7 of a digit is reserved and has no rectangle.
+    validate() still allows up to NIBBLES (8) rectangles: the prefetch's 3-bit
+    slot select could display an eighth in a variant of the RTL, but this chip's
+    glyph, and so every cell digit() returns, has seven.
 
     The cell size, and with it the whole grid, comes from the parameters -- a
     thicker or more widely spaced digit needs a bigger cell, and fewer of them
@@ -122,11 +124,8 @@ class Shape:
     def __init__(self, segs, params=None):
         self.segs = tuple(tuple(r) for r in segs)
         self.params = dict(params or {})
-        # The body is the seven bars; the decimal point sits in the gap, so it
-        # must not count towards the size.
-        body = self.segs[:7]
-        self.w = max(r[1] for r in body) + 1
-        self.h = max(r[3] for r in body) + 1
+        self.w = max(r[1] for r in self.segs) + 1
+        self.h = max(r[3] for r in self.segs) + 1
         self.gap_x = self.params.get("gap_x", 0)
         self.gap_y = self.params.get("gap_y", 0)
         self.cell_w = self.w + self.gap_x
@@ -145,7 +144,10 @@ class Shape:
         return self.segs + ((self.cell_w, self.cell_h),)
 
     def name(self, seg):
-        return segments.SEGMENTS[seg][0]
+        """a..g for the chip's segments. A hand-built cell that validate() is
+        about to reject can have more, and its error messages still need a name
+        for them."""
+        return segments.SEGMENTS[seg][0] if seg < segments.NUM_SEGMENTS else f"#{seg}"
 
     def rect(self, seg):
         return self.segs[seg]
@@ -159,10 +161,9 @@ class Shape:
         return (x0 + x1) // 2, (y0 + y1) // 2
 
     def is_dark(self, seg):
-        """The generator lights every segment but the decimal point, which has
-        no sensible place in a picture -- and a cell with no room for one has
-        nothing to light at all."""
-        return seg >= len(self) or seg == 7
+        """The generator lights every segment. The nibbles it leaves at 0 are
+        the ones with no segment: the reserved one, nibble 7."""
+        return seg >= len(self)
 
     def pixels(self, col, row, seg):
         """Screen rectangle covered by one segment of one cell: the same thing
@@ -249,7 +250,7 @@ def digit(**params):
     yu0, yu1 = th, th + lv - 1       # f, b
     yg0, yg1 = yu1 + 1, yu1 + th     # g
     yl0, yl1 = yg1 + 1, yg1 + lv     # e, c
-    yd0, yd1 = yl1 + 1, yl1 + th     # d, DP
+    yd0, yd1 = yl1 + 1, yl1 + th     # d
     segs = [
         (xm0, xm1, ya0, ya1),  # a
         (xr0, xr1, yu0, yu1),  # b
@@ -259,12 +260,6 @@ def digit(**params):
         (xl0, xl1, yu0, yu1),  # f
         (xm0, xm1, yg0, yg1),  # g
     ]
-    # The decimal point is a dot in the first gap column, which is where a real
-    # display puts it -- so a digit with no gap to its neighbour simply hasn't
-    # got one, and its nibble goes unused. One pixel wide whatever the rails
-    # are: it is a point, not a bar, and that is what the chip draws.
-    if p["gap_x"] >= 1:
-        segs.append((w, w, yd0, yd1))
     return Shape(segs, p)
 
 
@@ -298,11 +293,8 @@ def warnings(shape):
     if shape.gap_x <= 0:
         msgs.append(
             "gap_x is 0: a digit's right rail touches its neighbour's left rail, so the "
-            "grid reads as a mesh rather than as digits -- and there is nowhere to put "
-            "the decimal point, so nibble 7 goes unused"
+            "grid reads as a mesh rather than as digits"
         )
-    elif shape.gap_x == 1:
-        msgs.append("the decimal point fills the only gap column, so it touches the next digit")
     if shape.gap_y <= 0:
         msgs.append(
             "gap_y is 0: a bottom bar touches the top bar of the row below, so the rows "
@@ -327,7 +319,7 @@ def _row_segments(own, cell_h, cell_w):
 def _predicate(shape, rows):
     """The cx predicate, as a bitmask over the cell's columns: set means that
     column selects slot 1 (the high nibble), i.e. this cell's
-    `xz_right | xz_dp`.
+    `xz_right`.
 
     A pair on one scanline has to land on opposite sides of it, and the
     predicate is one function of cx for the whole cell, so every segment in
@@ -389,7 +381,7 @@ def _predicate(shape, rows):
                         "scanline, and the slot select is shared by all rows"
                     )
         # Orient the component so the right-hand side is slot 1, as the chip's
-        # own xz_right | xz_dp is.
+        # own xz_right is.
         first = {0: [], 1: []}
         for root2 in group:
             for seg in constrained:

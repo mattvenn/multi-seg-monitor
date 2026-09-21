@@ -19,8 +19,8 @@ tools/palette_builder/palette_builder.py shows them live, with a slider each,
 and prints the --param string for the setting on screen.
 
 Coordinates are screen pixels relative to the grid's top-left: a segment is
-sampled at its centre, so there are 6 distinct x positions per digit (f/e, a/g/d,
-b/c, DP) -- 18944 "pixels" rather than 2368. In RTL those are col*12 plus a
+sampled at its centre, so there are 3 distinct x positions per digit (f/e, a/g/d,
+b/c) -- 10017 "pixels" rather than 1431. In RTL those are col*15 plus a
 per-segment constant, i.e. a shift-and-add, not a multiply. --per-digit samples
 every segment at the digit centre instead, for comparison.
 

@@ -170,8 +170,8 @@ def _effect_coords(shape=None):
         n = np.arange(cell.rows * cell.cols * 8)
         digit, seg = n // 8, n % 8
         row, col = digit // cell.cols, digit % cell.cols
-        # A cell with no room for the decimal point has no nibble 7 to draw,
-        # so it indexes offset 0 and is masked off by is_dark below.
+        # Nibble 7 is reserved and has no segment to draw, so it indexes
+        # offset 0 and is masked off by is_dark below.
         ox = np.array([cell.sample(s)[0] if s < len(cell) else 0 for s in range(8)])
         oy = np.array([cell.sample(s)[1] if s < len(cell) else 0 for s in range(8)])
         dark = np.array([cell.is_dark(s) for s in range(8)])
@@ -186,9 +186,8 @@ def index_image_from_effect(name, frame, params, fade=15, shape=None):
 
     The effect's sample function is evaluated once over the whole frame as
     numpy arrays (attract_proto writes its maths so the same code runs on ints
-    or arrays), then scattered like index_image_from_frame. DP stays dark, as
-    in attract_proto.sample() -- and so does its nibble on a cell too wide to
-    have a decimal point at all.
+    or arrays), then scattered like index_image_from_frame. The reserved
+    nibble 7 stays dark, as in attract_proto.sample().
     `fade` (0..15) is attract_proto.apply_fade's level, for the fade through
     black between effects.
     """
@@ -787,7 +786,7 @@ class App:
                      row=2, column=0, sticky="ew", pady=(4, 0))
         # What the RTL would need for these proportions: the y bands naming
         # the two nibbles a scanline fetches, and the cx predicate that picks
-        # between them -- slot0_seg/slot1_seg and xz_right | xz_dp.
+        # between them -- slot0_seg/slot1_seg and xz_right.
         ttk.Label(digit, text="cy bands -> (slot 0, slot 1), for the RTL:").grid(
             row=3, column=0, sticky="w", pady=(8, 0))
         ttk.Entry(digit, textvariable=self.digit_bands, state="readonly", width=34).grid(

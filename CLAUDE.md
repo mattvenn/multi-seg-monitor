@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 A Tiny Tapeout ASIC that renders a 53x27 grid of 7-segment digits (1431 digits,
-11448 segments, 4 bits of brightness each) as an 800x600@60Hz VGA signal. Data is
+10017 segments, 4 bits of brightness each) as an 800x600@60Hz VGA signal. Data is
 streamed in a byte at a time by the demoboard's RP2350.
 
 **This branch (`digit-shape`) carries a different glyph from `main`**: a fat
@@ -166,7 +166,9 @@ so that blanking is worth **1.23 digit rows** of lead where it used to be worth
 1.69 — and the lead has to stay above one row. Anything spent before the host's
 first byte comes straight off it. Measured by `make -C test delay-sweep` on this
 glyph: clean through **250 µs**, first corruption at 300 µs (14 of 11448
-segments, the last three columns of the top eight digit rows). On `main` the
+nibbles, counted while the sweep still checked the decimal point -- it now
+reports out of 10017 segments -- the last three columns of the top eight digit
+rows). On `main` the
 same sweep put it near 450 µs. So the budget is roughly **250 µs**, down from
 450, against an RP2350 vsync-interrupt jitter under 10 µs.
 
@@ -199,7 +201,12 @@ curve.
 `src/multi_seg_monitor.v` and `tools/segments.py` both encode the segment
 rectangles and the nibble ordering. If one changes the other must too, or the
 round-trip test will say so. Nibble order within a digit word is fixed
-low-to-high as `a, b, c, d, e, f, g, DP` — host software depends on it.
+low-to-high as `a, b, c, d, e, f, g`, then a reserved nibble (byte 3's high half)
+that the chip ignores — it was a decimal point until this branch removed it, so
+existing 53x27 files still play here and merely stop showing their DP (`main`'s
+64x37 files are a different frame size and still need regenerating). Host
+software depends on this order. The stream is still 4 bytes a digit on purpose:
+a row stays 212 bytes and the pacing arithmetic below stays exact.
 
 `tools/shapes.py` is *not* a third copy: it builds the same digit from a
 thickness and a length for each orientation plus the gap to the next digit,

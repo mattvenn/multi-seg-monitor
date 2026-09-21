@@ -158,7 +158,7 @@ module zoneplate (
             3'd3:    {ox, oy} = {4'd6,  5'd17};
             3'd4:    {ox, oy} = {4'd1,  5'd13};
             3'd5:    {ox, oy} = {4'd1,  5'd5};
-            default: {ox, oy} = {4'd6,  5'd9};  // g; DP (7) is never sampled
+            default: {ox, oy} = {4'd6,  5'd9};  // g; nibble 7 is reserved, never sampled
         endcase
     end
     wire [9:0] sx_px = {col, 4'b0} - {4'b0, col} + {6'b0, ox};
@@ -264,8 +264,8 @@ module zoneplate (
                     if (!half) begin
                         lo   <= level;
                         half <= 1'b1;
-                        // Segment 7 is the decimal point, which the zone
-                        // plate leaves dark: no need to sample it.
+                        // Nibble 7 is reserved and always 0: there is no
+                        // segment to sample.
                         if (byte_idx == 2'd3) begin
                             hi <= 4'd0; ready <= 1'b1; st <= 3'd0;
                         end else begin

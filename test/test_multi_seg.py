@@ -227,18 +227,17 @@ async def test_render_frame(dut):
 
 def check_against_model(px, width, model, label):
     """Every segment of a captured frame against an attract_proto sample
-    function. Segment 7 is the decimal point, which the generator leaves
-    dark."""
+    function."""
     import attract_proto
 
     bad = []
     for row in range(ROWS):
         for col in range(COLS):
-            for seg in range(8):
+            for seg in range(segments.NUM_SEGMENTS):
                 x, y = segments.segment_centre(col, row, seg)
                 got = px[(y * width + x) * 3] // 17
-                want = 0 if seg == 7 else model(col * CELL_W + attract_proto.SEG_CX[seg],
-                                                row * CELL_H + attract_proto.SEG_CY[seg])
+                want = model(col * CELL_W + attract_proto.SEG_CX[seg],
+                             row * CELL_H + attract_proto.SEG_CY[seg])
                 if got != want:
                     bad.append((col, row, seg, got, want))
     assert not bad, (
@@ -433,7 +432,10 @@ async def test_stream_frame(dut):
         for col in range(segments.COLS):
             off = segments.digit_offset(col, row)
             sent = segments.unpack_digit(frame[off : off + 4])
-            for seg in range(8):
+            # Nibble 7 is sent (make_test_frame fills it) but reserved: there is
+            # no pixel to read it back from. test_reserved_nibble_is_ignored
+            # checks that it draws nothing.
+            for seg in range(segments.NUM_SEGMENTS):
                 x, y = segments.segment_centre(col, row, seg)
                 # No gamma stage: the stored intensity is the DAC code.
                 want = sent[seg]
@@ -442,17 +444,40 @@ async def test_stream_frame(dut):
                     bad.append((col, row, segments.SEGMENTS[seg][0], sent[seg], want, got))
 
     assert not bad, (
-        f"{len(bad)} of {segments.ROWS * segments.COLS * 8} segments wrong, "
+        f"{len(bad)} of {segments.ROWS * segments.COLS * segments.NUM_SEGMENTS} segments wrong, "
         f"first few: {bad[:5]}"
     )
 
     png.write_png("frame_stream.png", width, height, px)
     dut._log.info(
         "stream ok: %d segments round-tripped, wrote frame_stream.png",
-        segments.ROWS * segments.COLS * 8,
+        segments.ROWS * segments.COLS * segments.NUM_SEGMENTS,
     )
 
     check_gold(dut, "stream.png", width, height, px)
+
+
+@cocotb.test()
+async def test_reserved_nibble_is_ignored(dut):
+    """Nibble 7 -- byte 3's high half -- is reserved: a frame that lights only
+    that nibble must draw nothing. It used to be the decimal point, so a stream
+    written for the old chip (or a host that leaves junk there) still has data
+    in it, and none of it may reach the screen."""
+    cocotb.start_soon(Clock(dut.clk, CLK_PS, unit="ps").start())
+    await reset(dut)
+    dut.uio_in.value = UIO_IDLE
+
+    frame = bytes([0x00, 0x00, 0x00, 0xF0]) * (segments.ROWS * segments.COLS)
+    assert len(frame) == segments.FRAME_BYTES
+    cocotb.start_soon(host_stream(dut, frame, frames=7))
+    await capture_frame(dut)
+
+    width, height, px = read_ppm("frame.ppm")
+    lit = [i // 3 for i in range(0, len(px), 3) if px[i] or px[i + 1] or px[i + 2]]
+    assert not lit, (
+        f"{len(lit)} pixels lit by a frame whose only set nibble is the reserved one; "
+        f"first at ({lit[0] % width}, {lit[0] // width})"
+    )
 
 
 # --------------------------------------------------------------------------
@@ -1026,7 +1051,7 @@ def analyse(px, width, frame):
     first_bad = {}
     for row in range(segments.ROWS):
         for col in range(segments.COLS):
-            for seg in range(8):
+            for seg in range(segments.NUM_SEGMENTS):
                 x, y = segments.segment_centre(col, row, seg)
                 got = px[(y * width + x) * 3] // 17
                 if got == want(col, row, seg):
@@ -1057,7 +1082,7 @@ async def run_delay_case(dut, delay_us):
     png.write_png(name, width, height, px)
 
     lead = (V_LEAD_CLOCKS - delay_us * 40) / BYTE_PERIOD
-    total = segments.ROWS * segments.COLS * 8
+    total = segments.ROWS * segments.COLS * segments.NUM_SEGMENTS
     dut._log.info(
         "delay %d us: lead %.0f bytes (%.2f rows), %d/%d segments wrong, "
         "%d of them stale from row-4, wrote %s",

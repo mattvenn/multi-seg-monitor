@@ -9,7 +9,7 @@ An ASIC does the VGA signal generation, using the Tiny Tapeout standard.
 
 The RP2350 on the demoboard interfaces with the ASIC to send data.
 
-A 53 x 27 grid of digits — 1431 digits, 11448 segments — each segment with its own
+A 53 x 27 grid of digits — 1431 digits, 10017 segments — each segment with its own
 4 bit brightness, in a fat 15x22 cell. The chip holds no framebuffer: it races the
 beam, keeping only the digit row it is currently drawing. `python3 tools/shapes.py`
 prints the glyph, the grid and the byte rate it implies; `main` carries a smaller
@@ -295,7 +295,7 @@ repeat.
     tools/video2seg.py clip.mp4 video.seg --fps 24    # 5724 bytes per frame
     tools/seg2png.py video.seg preview.png --frame 30 # check it before deploying
 
-Each of the 11448 segments averages the source pixels its own rectangle covers, in
+Each of the 10017 segments averages the source pixels its own rectangle covers, in
 linear light — one sample per digit would throw away most of the resolution that
 per-segment brightness exists to provide.
 

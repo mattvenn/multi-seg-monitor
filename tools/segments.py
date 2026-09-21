@@ -254,10 +254,10 @@ def verify_palettes(palettes=None):
 
 
 # Segment rectangles within a cell, as (name, x0, x1, y0, y1) inclusive.
-# Index order is the nibble order of a digit word: a, b, c, d, e, f, g, DP.
-# The digit body is 13x20; columns 13-14 and rows 20-21 are the gaps that keep
-# neighbouring digits from merging, and the decimal point lives in the first
-# gap column.
+# Index order is the nibble order of a digit word: a, b, c, d, e, f, g, and
+# then nibble 7, which is reserved: it used to be a decimal point, and the chip
+# now ignores it. The digit body is 13x20; columns 13-14 and rows 20-21 are the
+# gaps that keep neighbouring digits from merging.
 SEGMENTS = [
     ("a", 4, 8, 0, 3),
     ("b", 9, 12, 4, 7),
@@ -266,11 +266,12 @@ SEGMENTS = [
     ("e", 0, 3, 12, 15),
     ("f", 0, 3, 4, 7),
     ("g", 4, 8, 8, 11),
-    ("DP", 13, 13, 16, 19),
 ]
+NUM_SEGMENTS = len(SEGMENTS)  # 7 drawn; the eighth nibble of a digit is reserved
 
 def pack_digit(intensities):
-    """Eight 4-bit segment intensities -> 4 bytes, low nibble first."""
+    """Eight 4-bit nibbles -> 4 bytes, low nibble first: the seven segments,
+    then the reserved nibble (byte 3's high half), which the chip ignores."""
     assert len(intensities) == 8
     return bytes(
         (intensities[2 * k + 1] << 4) | (intensities[2 * k] & 0xF) for k in range(4)
@@ -278,7 +279,7 @@ def pack_digit(intensities):
 
 
 def unpack_digit(data):
-    """4 bytes -> eight 4-bit segment intensities."""
+    """4 bytes -> eight 4-bit nibbles; the last is the reserved one."""
     assert len(data) == 4
     out = []
     for byte in data:

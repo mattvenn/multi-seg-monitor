@@ -1,5 +1,9 @@
 # Branch `digit-shape`: the 4/5/4/4/2/2 glyph in RTL
 
+> Note (2026-09-21): the decimal point described below was removed later; nibble 7 is now
+> reserved and ignored. See docs/superpowers/specs/2026-09-21-remove-decimal-point-design.md.
+> The numbers in this plan (e.g. 11448 segments, 9472-byte frames) predate that change.
+
 ## Starting cold
 
 This file is the plan; it lives on the `digit-shape` branch and nowhere else.
