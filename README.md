@@ -21,10 +21,7 @@ reasoning behind it, and [resolution_discussion.md](resolution_discussion.md) se
 * Levels of brightness — 4 bits per segment, sent through a colour palette (see
   below). A palette is three per-channel curves, each two straight lines through
   a movable knee, clipped at 15 — enough for tinted ramps and basic per-monitor
-  gamma shaping. A 4-bit DAC can't bend a curve and still keep all 16 stored
-  levels distinct (pigeonhole — see the comment in `src/palette.v`), so the knee
-  chooses where levels collide rather than avoiding it; preset 0 is the plain
-  grey identity.
+  gamma shaping. 
 * Colour — a whole-display choice, not per-segment colour, since every display
   this imitates is single colour anyway. A reset-time strap picks the physical
   Pmod and one of 8 built-in palettes; a config packet sent before streaming can
@@ -35,54 +32,39 @@ reasoning behind it, and [resolution_discussion.md](resolution_discussion.md) se
 
 # Status
 
-RTL complete: internal generator, byte-wide stream port, and a video pipeline that
-turns any clip into segment intensities.
-
 | | |
 |---|---|
-| VGA | 800x600 @ 60 Hz, 40 MHz |
-| FPGA | not re-measured since the move to 800x600 (was 431 / 5280 logic cells, 8%, 2 / 30 EBR, at 640x480) |
-| Timing | 39.58 MHz max, ~1% short of the 40 MHz target — runs clean on real UP5K hardware anyway (resolution_discussion.md §11) |
-| Tests | 4 cocotb + 3 converter, all passing, 3 frames against gold images |
+| VGA | 800x600 @ 60 Hz, 40 MHz pixel clock |
+| Tests | 19 cocotb (5 compare pixel for pixel against `test/gold/`), 3 converter, 17 palette, 23 palette-builder; 5 formal proofs |
+| FPGA | 1101 / 5280 logic cells (20%), 2 / 30 EBR, 3 / 8 DSP on the UP5K |
+| FPGA timing | nextpnr reports ~31–34 MHz depending on seed, against the 40 MHz target — it fails the check but runs on real hardware anyway |
+| ASIC | `ihp-sg13g2`, 2x2 tiles: GDS builds, LVS matches, no setup or hold violations, gate-level sim and the Tiny Tapeout precheck pass. Tight — 86% core utilisation at the last measurement, before the attract-mode logic went in |
 
-**Working on the FPGA breakout.** The internal generator and the stream port both run
-on hardware, driven from the demoboard — steps 1 and 2 of [Bring-up](#bring-up),
-which is also where what that run cost is written down. Full rate video, step 3, has
-not been run.
-
-**All 16 grey levels confirmed distinguishable on hardware.** A gamma curve here
-can't both warp the perceptual response and keep 16 stored levels mapped to 16
-distinct DAC codes -- a 4-bit output only has 16 codes to begin with, so any
-non-trivial curve is forced to collide two of them (indices 14 and 15 did,
-exactly, before this was found). Removing the curve and sending the stored
-intensity straight to the DAC was confirmed on real hardware, not just in
-simulation -- see the comment above `grey` in `src/multi_seg_monitor.v` and
-`dithering_investigation.md` on the `gamma-dithering` branch for the investigation
-that found it.
-
-**The vsync tearing is fixed.** `firmware/seg_player.py` takes the vsync interrupt
-with `hard=True`, which puts the DMA restart about 80 µs after the edge against a
-budget of roughly 450 µs. Measured on a scope, not inferred — see
-[If the picture tears](#if-the-picture-tears) for the captures and for why the
-handler, not the restart code, was the slow part.
-
-For the ASIC, `info.yaml`/`src/config.json` now target 40 MHz to match the RTL, and
-the GDS builds, LVS matches, timing closes at that constraint on `ihp-sg13g2`, and
-gate level simulation passes. Tiny Tapeout's precheck still fails on 2672 KLayout DRC
-violations, unrelated to any of this — all of them are inside the IHP SRAM macro's
-own cells rather than in this design.
+The internal generator and streamed playback both run on the FPGA breakout, driven from
+the demoboard. Steps 1 and 2 of [Bring-up](#bring-up) are the ones that have been through
+it; vsync tearing was found and fixed there — see
+[If the picture tears](#if-the-picture-tears).
 
 # Building
 
-Needs [oss-cad-suite](https://github.com/YosysHQ/oss-cad-suite-build) on the path.
+Needs [oss-cad-suite](https://github.com/YosysHQ/oss-cad-suite-build) on the path. The
+converter and palette-builder tests also need numpy, and the builder's GUI needs Tk.
 
+    make test                 # cocotb tests + converter and palette tests
+    make formal               # SymbiYosys proofs
     make bitstream            # synth + place & route + pack, for the TT FPGA breakout
-    make test                 # cocotb tests + converter tests
-    make -C test delay-sweep  # vsync latency sweep, ~9 min, writes frame_delay_*.png
+    make -C test delay-sweep  # vsync latency sweep, ~3 min under verilator, writes frame_delay_*.png
     make -C test gold         # rewrite the gold images after an intended change
 
+`SIM=verilator` speeds the frame-capture tests up several times over icarus, the default
+(the whole suite runs in about a minute). `IHP_SRAM=1` runs the suite against the
+foundry SRAM macro instead of an inferred array, which is what the ASIC hardens; CI runs
+both.
+
 `make bitstream` mirrors `tt_fpga.py harden` so it runs without the tt-support-tools
-python environment. Deploying to the demoboard still needs the real tool:
+python environment. It currently stops at nextpnr's 40 MHz timing check, before
+`icepack`; add `--timing-allow-fail` to the nextpnr line in the `Makefile` to get a
+flashable `.bin`. Deploying to the demoboard needs the real tool:
 
     python tt_fpga.py --project-dir . configure --upload
 
@@ -91,39 +73,36 @@ or, equivalently:
     make flash TT_TOOLS=/path/to/tt-support-tools PORT=/dev/ttyACM4
 
 `flash` rebuilds the bitstream if needed, then runs `tt_fpga.py configure --upload
---set-default --clockrate 40000000` against it. `PORT` defaults to `/dev/ttyACM4`.
-
-The frame test captures from the output pins and writes `test/frame.png`, so geometry
-can be iterated without hardware. That loop is what caught the first segment layout
-filling its whole cell — adjacent digits merged into each other and the grid was
-illegible.
-
-Three captures are also compared pixel for pixel against committed images in
-`test/gold/`, which is what catches a change in how the picture looks rather than a
-violation of a rule — a segment a pixel wide, a brightness code off by one. A mismatch
-writes a `_diff.png` with the disagreeing pixels in red. After an intended change,
-`make -C test gold` rewrites them; look at what it produces before committing, as
-nothing else will.
-
-# Bring-up
-
-The order to try it in, chosen so each step adds one thing and a failure points
-somewhere specific. Steps 1 and 2 have been through this on the FPGA breakout, and
-the notes below are what that cost rather than what was expected to.
-
-**On a new machine.** The build needs two paths:
-
-    export PATH=/path/to/oss-cad-suite/bin:$PATH
-    make bitstream TT_TOOLS=/path/to/tt-support-tools
-
-`configure --upload` also needs tt-support-tools' python environment, which was
-missing `klayout` and `chevron` on the machine this was written on —
+--set-default --clockrate 40000000` against it. `TT_TOOLS` defaults to
+`~/asic/tt-support-tools` and `PORT` to `/dev/ttyACM4`. `configure --upload` needs
+tt-support-tools' python environment, which can be missing `klayout` and `chevron` —
 `pip install -r requirements.txt` in that repo.
 
-The default output is a **Digilent PmodVGA** across both output headers: R on
-`uo_out[3:0]`, B on `uo_out[7:4]`, G on `uio[3:0]`, hsync on `uio[4]` and vsync on
-`uio[5]`. Strobe and mode select sit on `uio[6]` and `uio[7]`, which is where
-PmodVGA leaves two pins not connected.
+The frame tests capture from the output pins — what the Pmod would see — and write
+`test/frame.png`, so geometry can be iterated without hardware. Five captures are also
+compared pixel for pixel against committed images in `test/gold/`, which is what catches
+a change in how the picture looks rather than a violation of a rule — a segment a pixel
+wide, a brightness code off by one. A mismatch writes a `_diff.png` with the disagreeing
+pixels in red. After an intended change, `make -C test gold` rewrites them; look at what
+it produces before committing, as nothing else will.
+
+# Pinout
+
+The default output is a **Digilent PmodVGA** across both output headers:
+
+| Pin | Use |
+|---|---|
+| `uo_out[3:0]` / `uo_out[7:4]` | R / B nibbles |
+| `uio[3:0]` | G nibble |
+| `uio[4]` / `uio[5]` | hsync / vsync |
+| `uio[6]` | stream strobe (config strobe while `uio[7]` is low) |
+| `uio[7]` | mode select: high = stream, low = internal generator + config packets |
+| `ui_in[7:0]` | stream data (bits 3:0 double as the reset strap) |
+
+Strobe and mode select sit where PmodVGA's second connector leaves two pins not
+connected. The **Tiny Tapeout VGA Pmod** is the alternative output: 2 bits per channel,
+all on `uo_out` as `{hsync, B0, G0, R0, vsync, B1, G1, R1}`, `uio[0:5]` unused and
+`uio_oe` all-input. `uio[6:7]` stay exactly where they are in both modes.
 
 ### Reset-time config strap
 
@@ -137,17 +116,16 @@ ordinary stream data for the rest of the chip's life:
 
 The host must hold its chosen value on these bits for the entire reset pulse,
 not just assert it once — the strap register re-samples every cycle `rst_n`
-is low, so the *last* value before it rises is what sticks. Tiny VGA mode
-only uses `uo_out` (2 bits/channel); `uio[0:5]` go unused and `uio_oe` goes
-all-input in that mode, `uio[6:7]` (strobe/mode select) stay exactly where
-they are in both modes. See `src/config_port.v` and `src/palette.v`.
+is low, so the *last* value before it rises is what sticks. The strap is what
+makes the pins safe from the first cycle out of reset: a Tiny VGA board must
+never see `uio` driven while it waits for a config packet. See
+`src/config_port.v` and `src/palette.v`.
 
 ### DIP switches
 
-`ui_in[0]` is the Pmod strap and is read at reset only, never live — a Tiny
-VGA board must not see `uio` driven while it waits. The rest of `ui_in` is
-read live, but only in generator mode, where nothing else is using those pins.
-All off is the default attract mode:
+`ui_in[0]` is the Pmod strap and is read at reset only, never live. The rest of
+`ui_in` is read live, but only in generator mode, where nothing else is using those
+pins. All off is the default attract mode:
 
 | Bit | Off (default) | On |
 |---|---|---|
@@ -192,6 +170,8 @@ a packet or the manual switch turns cycling off. A valid header also hands the
 `main(curve=...)` sends one for you; `tools/segments.py`'s `config_packet()`
 builds one from Python, and `tools/palette_builder` exports the exact bytes.
 
+# Bring-up
+
 **1. Internal generator, no firmware.** Leave `uio[7]` low and the design ignores the
 stream port entirely. You should get a zone plate drawn across the 64x37 grid:
 concentric rings that tighten outward and flow slowly, with the palette changing
@@ -204,81 +184,6 @@ That has not been checked on hardware yet; if nothing appears, tie it low
 before suspecting anything else. Then work through the switches above: each
 one should change what you see within two frames.
 
-If this fails, in rough order of likelihood:
-
-| Symptom | Look at |
-|---|---|
-| Nothing at all, and the project never came up | `tt.shuttle.<name>.enable()` reads a dedicated GPIO to detect the FPGA carrier, and on this board that detect is unreliable — it falls back to the ASIC shuttle mux and the name lookup fails. `firmware/seg_player.py` pushes the bitstream with `spi_transferPIO` instead, which is all `.enable()` does for an FPGA target |
-| No signal / monitor out of range | The clock. Ask `clock_project_PWM` what it actually produced rather than assuming a divider: it retunes the RP2350's own sysclk to whatever divides most cleanly to the target, so the ratio from sysclk to pixel clock is not fixed. Anything derived from the pixel clock has to be derived from the value it returns |
-| Sync but no picture, or garbage | Pmod pinout. Only PmodVGA is wired up, and it needs both headers — hsync and vsync are on `uio[4:5]`, not on `uo_out` at all. Tiny VGA and the VGA Clock pmod both have a different order |
-| Picture but sheared or rolling | VGA timing constants — but these come from `ttihp0p4-vga-clock`, which works, so suspect the clock first |
-
-**2. Streamed static image.** Set `uio[7]` high and push a single frame repeatedly.
-`tools/video2seg.py` on a still image gives you one, and `tools/make_diag_pattern.py`
-gives you a frame built to make corruption countable rather than subtle — one segment
-per row keyed on `row % 4`, so stale data from the wrong line buffer slot lights the
-wrong segment instead of shifting a brightness. If the generator worked and this does
-not, the problem is in the stream port or the player, not the renderer.
-
-**3. Video.** Only after 2 is stable.
-
-## If the picture tears
-
-This is the failure the hardware run actually produced, and it is worth recognising
-on sight because the cause is not where it appears to be.
-
-Each digit row is drawn from a line buffer the host is still filling. The renderer
-re-reads the whole 256 byte row on every one of its 16 scanlines — 1056 clocks — while
-the host takes 16896 to fill it, so the host has to be a **full row ahead**. It builds
-that lead during vertical blanking, 713 µs, and anything spent before the first byte
-comes straight off it.
-
-`make -C test delay-sweep` puts numbers on it by delaying the testbench host's first
-byte after vsync, 0 to 1000 µs, and writing a frame for each:
-
-| Delay before first byte | Lead | Result |
-|---|---|---|
-| ≤ 400 µs | ≥ 190 bytes | clean |
-| 500 µs | 129 bytes | tears from column 52 |
-| 600 µs | 68 bytes | tears from column 36 |
-| 800 µs | -53 bytes | tears from column 4 |
-
-So the budget from vsync to the first byte is **about 450 µs**, and what blew it was
-the *dispatch*, not the handler body.
-
-`Pin.irq` defaults to a soft IRQ, which does not run in the interrupt at all — it
-waits for `micropython.schedule()` to reach a bytecode boundary, and `service()`
-reads 6240 bytes off flash in one uninterruptible call. That routinely pushed the
-first strobe out to 500–600 µs. Passing `hard=True` dispatches from the interrupt
-itself and brings it to about 80 µs, comfortably inside budget, with the ordinary
-`dma.config()` body left alone.
-
-Both captures below are the same trigger on vsync falling, with the cursor pair set
-542 µs apart:
-
-![soft IRQ](docs/scope/instrumented_soft_irq.png)
-
-*Soft IRQ: nothing has moved by the 542 µs cursor, and the byte stream starts after
-it.*
-
-![hard IRQ](docs/scope/instrumented_hard_irq.png)
-
-*`hard=True`: the handler runs at the left edge of the window instead.*
-
-Rewriting the handler to poke the DMA registers directly was tried first and is not
-the answer. The restart code was never the slow part, and the register version broke
-the DMA trigger outright — no strobe and no data at all.
-
-If it ever tears again, measure from vsync falling to the first strobe before
-changing anything. Interrupt latency itself is under 10 µs on this platform, so it is
-not a plausible cause on its own.
-
-The signature, if you want to confirm the diagnosis rather than infer it: the tear
-starts at column ≈ lead/4 + 2.5 and walks right as the row is drawn, so digits show
-one frame in their top half and another in their bottom. The stale content is digit
-row **R−4**, four buffers back — on a still image that reads as a piece of the picture
-from elsewhere, not as a repeat.
-
 # Playing video
 
     tools/video2seg.py clip.mp4 video.seg --fps 24    # 9472 bytes per frame
@@ -288,15 +193,20 @@ Each of the 18944 segments averages the source pixels its own rectangle covers, 
 linear light — one sample per digit would throw away most of the resolution that
 per-segment brightness exists to provide.
 
-Copy the `.seg` file and `firmware/seg_player.py` to the demoboard. Frames grew 52%
-over the 640x480 mode's 6240 bytes (`resolution_discussion.md` §11), so the same 4 MB
-flash now holds about 17 seconds at 24 fps rather than 26 — existing `.seg` files
-predate the frame size change and need regenerating, not reusing.
+Copy the `.seg` file and `firmware/seg_player.py` to the demoboard. Frames are 9472
+bytes; `.seg` files made for the old 640x480 mode (6240 bytes a frame) need
+regenerating, not reusing.
+
+The chip has no framebuffer, so the player re-pushes every displayed frame at 60.3 Hz
+(≈571 kB/s) regardless of the video's own rate. Pacing is free: a digit row is 16
+scanlines and 256 bytes, so one byte every 66 pixel clocks tracks the raster exactly,
+with no remainder to accumulate.
 
 ### Choosing the Pmod and palette
 
 `firmware/seg_player.py` (streaming) and `firmware/gen_mode.py` (internal generator)
-both take the choice as arguments to `main()`:
+both take the choice as arguments to `main()`, defaulting to the `PMOD_TYPE` and
+`PALETTE` constants at the top of each file:
 
 | Argument | Values |
 |---|---|
@@ -305,23 +215,20 @@ both take the choice as arguments to `main()`:
 | `curve` | optional custom palette, overriding `palette`: three `(x1, y1, x2, y2)` point pairs for R, G, B, as `tools/palette_builder`'s Export prints |
 | `cycle` | `gen_mode.py` only: `True` (the default) steps through all 8 presets every ~17 s |
 
-`mpremote run firmware/seg_player.py` calls `main()` with its defaults, so to choose,
-copy the file across once and call it yourself:
+`pmod_type` and `palette` go in as the reset strap; `curve` and `cycle` are sent as a
+config packet after reset, before any pixels (see "Config packet" above). To change the
+defaults, edit the constants and use `mpremote run`:
+
+    mpremote run firmware/seg_player.py
+
+or copy the file across once and call `main()` yourself (`mpremote run` execs a single
+file, so the firmware can't import from `tools/`):
 
     mpremote cp firmware/seg_player.py :
     mpremote exec "import seg_player; seg_player.main(pmod_type=0, palette=4)"
 
     mpremote cp firmware/gen_mode.py :
     mpremote exec "import gen_mode; gen_mode.main(pmod_type=0, curve=((1, 0, 8, 15), (1, 0, 15, 10), (10, 0, 15, 5)))"
-
-Or edit the `main()` call at the bottom of the file and keep using `mpremote run`.
-`pmod_type` and `palette` go in as the reset strap; `curve` and `cycle` are sent as a
-config packet after reset, before any pixels (see "Config packet" above).
-
-The chip has no framebuffer, so the player re-pushes every displayed frame at 60.3 Hz
-(≈571 kB/s) regardless of the video's own rate. Pacing is free: a digit row is 16
-scanlines and 256 bytes, so one byte every 66 pixel clocks tracks the raster exactly,
-with no remainder to accumulate.
 
 # Inspiration
 
