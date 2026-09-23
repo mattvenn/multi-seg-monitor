@@ -69,6 +69,9 @@ each vsync. `tools/video2seg.py` converts a video or image to that format and
 
 Edit seg_player.py to set the Pmod type and palette choice.
 
+`firmware/clock_mode.py` streams a live 24-hour clock instead of a video file —
+see "Clock mode" in the README for the run command.
+
 ## External hardware
 
 **Digilent PmodVGA** across both output headers: R and B nibbles on `uo_out`, G nibble

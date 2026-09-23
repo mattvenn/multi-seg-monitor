@@ -202,11 +202,29 @@ The chip has no framebuffer, so the player re-pushes every displayed frame at 60
 scanlines and 256 bytes, so one byte every 66 pixel clocks tracks the raster exactly,
 with no remainder to accumulate.
 
+### Streaming video over USB instead
+
+`mpremote cp` above puts the whole `.seg` file on the RP2350's flash first, which caps
+video length at a few seconds per MB. `tools/usb_video_stream.py` instead streams a
+`.seg` file's bytes to the board live over USB, looping it indefinitely from the PC
+side, so flash size no longer bounds how much video plays:
+
+    tools/usb_video_stream.py video.seg /dev/ttyACM4 --fps 24
+
+It bootstraps `firmware/seg_stream.py` (a streaming sibling of `seg_player.py`; see
+that file's docstring) over the same serial connection `mpremote` uses, then just
+keeps writing frame bytes to it forever — don't also run `mpremote` against the same
+port at the same time, only one process can hold it. `--pmod-type` and `--palette`
+take the same values as below. Stopping it (Ctrl-C) freezes the chip on its last
+frame; reset or reflash the board to get back to a normal state.
+
 ### Choosing the Pmod and palette
 
-`firmware/seg_player.py` (streaming) and `firmware/gen_mode.py` (internal generator)
-both take the choice as arguments to `main()`, defaulting to the `PMOD_TYPE` and
-`PALETTE` constants at the top of each file:
+`firmware/seg_player.py` (streaming from flash), `firmware/seg_stream.py` (streaming
+over USB) and `firmware/gen_mode.py` (internal generator) all take the choice as
+arguments to `main()`, defaulting to the `PMOD_TYPE` and `PALETTE` constants at the
+top of each file (`seg_stream.py`'s only come from `tools/usb_video_stream.py`'s
+`--pmod-type`/`--palette`, since it's never run standalone):
 
 | Argument | Values |
 |---|---|
@@ -229,6 +247,33 @@ file, so the firmware can't import from `tools/`):
 
     mpremote cp firmware/gen_mode.py :
     mpremote exec "import gen_mode; gen_mode.main(pmod_type=0, curve=((1, 0, 8, 15), (1, 0, 15, 10), (10, 0, 15, 5)))"
+
+### Clock mode
+
+`firmware/clock_mode.py` draws a live 24-hour clock, using the digit grid itself as a
+pixel canvas: each big numeral is 15 small digit cells tall with 3-cell-thick strokes,
+built by lighting whole digit cells rather than real segments. There's no RTC on this
+board, so the wall-clock time has to come from the host PC at launch — `main()` takes
+`start_h`/`start_m`/`start_s` and free-runs from there:
+
+    mpremote cp firmware/clock_mode.py :
+    read H M S < <(date +"%H %M %S")
+    mpremote exec "import clock_mode; clock_mode.main(start_h=$H, start_m=$M, start_s=$S)"
+
+Lit cells aren't flat brightness — a digit has 7 real segments, and each one is shaded
+independently at its own sub-cell position on one diagonal linear gradient in screen
+space. The gradient's reach spans the whole display exactly once, so it always reads as
+a single uniform sweep across every digit at once rather than several repeats of the
+same ramp, and it scrolls slowly over time, riding whichever palette curve is loaded.
+Palette defaults to preset 3 (purple); `pmod_type`, `palette` and `curve` otherwise work
+the same as `seg_player.py`/`gen_mode.py` above.
+
+To preview the font, centering and gradient without any hardware attached, run the file
+directly under a plain desktop `python3` (the hardware imports are guarded and skipped;
+the preview prints intensity as a hex digit per cell at two points in the gradient's
+scroll):
+
+    python3 firmware/clock_mode.py 12:34:56
 
 # Inspiration
 
